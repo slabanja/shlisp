@@ -1,0 +1,849 @@
+#!/bin/bash
+
+# LISP SHLISP
+# Shlisp is a toy lisp, implemented in pure Bash, created for my own amusement.
+#
+#
+# Copyright (C) 2012 Mattias Slabanja <don.fanucci@gmail.com>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+if (( (BASH_VERSINFO[0] < 4) || ((BASH_VERSINFO[0] == 4) && (BASH_VERSINFO[1] < 2)) )); then
+    echo "Bash version >= 4.2 required."
+    exit
+fi
+
+# Using a little bit of Hungarian notation for references and such
+TYPE_CONS=C          # C... - Cons cell
+TYPE_INT=I           # I... - Int (directly inscribed in ref)
+TYPE_STRING=S        # S... - String
+TYPE_CONST=B         # B... - Builtin constant
+TYPE_FUNCTION=F      # F... - Function/lambda
+TYPE_BI_FUNCTION=f   # f... - Builtin function
+TYPE_MACRO=M         # M... - Macro
+TYPE_SPECIAL=P       # P... - Special builtin operator
+TYPE_SYMBOL=Y        # Y... - Symbol (directly inscribed in ref)
+
+PREF_ENVIRONMENT=ENV # Environment
+PREF_RETVAR=RV       # Return variable name prefix (internal use)
+
+SYMB_T=T
+SYMB_NIL=nil
+SYMB_BACKQUOTE=-backquote-
+SYMB_COMMA=-bq-comma-
+SYMB_COMMA_AT=-bq-comma-at-
+
+declare -i _index=0
+unset IFS
+unset objects outer_environment
+declare -A objects outer_environment reference_counter
+
+IFS=" "
+set -f
+
+exist () { [[ ${!1+X} ]]; }
+
+collect () {
+    # Unset objects not being referred to
+    unset IFS # compgen returns newline separated items
+    local -i aggregated=0 objects_collected i
+    for ((i=0; i < 10; i++)); do
+	((objects_collected=0))
+        for o in $(compgen -v ${PREF_ENVIRONMENT}) ${!objects[@]}; do
+            if ((${reference_counter[$o]:-0} == 0)); then
+                collect_object $o
+                ((objects_collected += 1))
+            fi
+        done
+        if ((objects_collected == 0)); then
+            break
+        fi
+        ((aggregated += objects_collected))
+    done
+    #if ((aggregated > 0)); then
+        #printf "Objects colleted : %i\n" $aggregated
+    #fi
+    IFS=" "
+}
+collect_object () {
+    # object=$1
+    local object=$1
+    case $object in
+        ${PREF_ENVIRONMENT}* )
+            collect_environment $object
+            ;;
+        ${TYPE_CONS}* )
+            collect_cons $object
+            ;;
+        ${TYPE_FUNCTION}* | ${TYPE_MACRO}* )
+            collect_lambda_or_macro $object
+            ;;
+        ${TYPE_STRING}* )
+            unset objects[$object]
+            unset reference_counter[$object]
+            ;;
+    esac
+}
+get_object () {
+    # retvar=$1 current_env=$2 symbol=$3
+    local retvar=$1 current_env=$2 symbol=$3
+    find_containing_environment $retvar $current_env "${symbol}" || return $?
+    eval $retvar=\"\${${!retvar}[${symbol}]}\"
+}
+bind_symbol () {
+    # current_env=$1 symbol="$2" object=$3
+    local current_env=$1 symbol="$2" object=$3
+    eval ${current_env}[${symbol}]=\"${object}\"
+    ((reference_counter[$object] += 1))
+}
+collect_cons () {
+    # cons=$1
+    local cons=$1 car cdr
+    read car cdr <<< ${objects[$cons]}
+    ((reference_counter[$car] -= 1))
+    ((reference_counter[$cdr] -= 1))
+    unset objects[$cons]
+    unset reference_counter[$cons]
+}
+create_cons () {
+    # retvar=$1 car=$2 cdr=$3
+    local retvar=$1 car=$2 cdr=${3:-${TYPE_CONST}${SYMB_NIL}} object=${TYPE_CONS}$((_index++))
+    objects[${object}]="${car} ${cdr}"
+    eval $retvar=${object}
+    ((reference_counter[$car] += 1))
+    ((reference_counter[$cdr] += 1))
+}
+set_car () {
+    # cons=$1 car=$2
+    local cons=$1 car="$2" ocar cdr
+    read ocar cdr <<< ${objects[$cons]}
+    objects[$cons]="${car} ${cdr}"
+    ((reference_counter[$ocar] -= 1))
+    ((reference_counter[$car] += 1))
+}
+set_cdr () {
+    # cons=$1 cdr=$2
+    local cons=$1 cdr="$2" ocdr car
+    read car ocdr <<< ${objects[$cons]}
+    objects[$cons]="${car} ${cdr}"
+    ((reference_counter[$ocdr] -= 1))
+    ((reference_counter[$cdr] += 1))
+}
+create_string () {
+    # retvar=$1 str=$2
+    local retvar=$1 str="$2" t
+    t=${TYPE_STRING}$((_index++))
+    objects[$t]="${str}"
+    eval $retvar=$t
+}
+collect_lambda_or_macro () {
+    # lambda=$1
+    local lambda=$1 env vars body
+    read env _ vars body <<< ${objects[$lambda]}
+    ((reference_counter[$env] -= 1))
+    ((reference_counter[$vars] -= 1))
+    ((reference_counter[$body] -= 1))
+    unset objects[$lambda]
+    unset reference_counter[$lambda]
+}
+create_lambda_or_macro () {
+    # retvar=$1 env=$2 vars=$3 body=$4 type=$5
+    local retvar=$1 env=$2 vars=$3 body=$4 type=${5} arity t
+    _length $retvar $vars || return 1
+    arity=${!retvar}
+    t=${type}$((_index++))
+    objects[$t]="$env $arity $vars $body"
+    eval $retvar=$t
+    ((reference_counter[$env] += 1))
+    ((reference_counter[$vars] += 1))
+    ((reference_counter[$body] += 1))
+}
+find_containing_environment () {
+    # retvar=$1 current_env=$2 symbol=$3
+    local retvar=$1 current_env=$2 symbol=$3
+    while [[ -n $current_env ]]; do
+        if exist "$current_env[${symbol}]"; then
+            eval $retvar=$current_env
+            return 0
+        fi
+        current_env=${outer_environment[$current_env]}
+    done
+    return 1
+}
+collect_environment () {
+    # $1=env
+    local env=$1 x="${1}[@]" o
+    for o in ${!x}; do
+        ((reference_counter[$o] -= 1))
+    done
+    unset outer_environment[$env]
+    unset $env
+}
+create_environment () {
+    # retvar=$1 outer_env=$2
+    local retvar=$1 outer_env=$2 e
+    e=${PREF_ENVIRONMENT}$((_index++))
+    unset $e
+    declare -g -A $e
+    if [[ -n $outer_env ]]; then
+        eval outer_environment[$e]=$outer_env
+    fi
+    eval $retvar=$e
+}
+tokenize () {
+    # Read from stdin, write tokens to stdout
+    while read -e -r line; do
+        if [[ $line =~ ^([^\;]*)\;.*$ ]]; then
+            line="${BASH_REMATCH[1]}"
+        fi
+        while ! [[ $line =~ ^\ *$ ]]; do
+            # Match opening (
+            [[ $line =~ ^\ *([,@\`\']*\()(.*)$ ]] ||
+            # Match closing )
+              [[ $line =~ ^\ *(\))(.*)$ ]] ||
+            # Match string (doesn't handle escaped ")
+              [[ $line =~ ^\ *([,@\`\']*\"[^\"]*\")(\ .*|\).*|.{0})$ ]] ||
+            # Match symbol or number
+              [[ $line =~ ^\ *([,@\`\']*[a-zA-Z0-9^#.\!?_~\<\>=|/*+-]+)(\ .*|\).*|.{0})$ ]] ||
+            # or fail
+              return 1
+            m="${BASH_REMATCH[1]}"
+            line="${BASH_REMATCH[2]}"
+            printf "%s\n" "$m"
+        done
+    done
+}
+read_tokens () {
+    # revar=$1 [token="$2"]
+    local retvar=$1 token="$2" head pre t
+    if [[ -z $token ]]; then
+        read token
+        [[ -n $token ]] || return $?
+    fi
+
+    if [[ ${token:0:1} =~ \'|\`|, ]]; then
+        case ${token:0:1} in
+            \' ) t=quote ;;
+            \` ) t=${SYMB_BACKQUOTE} ;;
+            , ) t=${SYMB_COMMA}
+                if [[ ${token:1:1} == @ ]]; then
+                    t=${SYMB_COMMA_AT}
+                    token="${token:1}"
+                fi
+                ;;
+            * ) return 1
+        esac
+        read_tokens $retvar "${token:1}" || return $?
+        create_cons $retvar ${!retvar} || return $?
+        create_cons $retvar ${TYPE_SYMBOL}${t} ${!retvar} || return $?
+    elif [[ $token =~ ^\"([^\"]*)\"$ ]]; then
+        create_string $retvar "${BASH_REMATCH[1]}" || return $?
+    elif [[ $token =~ ^-?[0-9]+$ ]]; then
+        eval $retvar=${TYPE_INT}$token
+    elif [[ $token == '(' ]]; then
+        while true; do
+            read token
+            [[ -n $token ]] || return $?
+            if [[ $token == ')' ]]; then
+                [[ -z $head ]] && head=${TYPE_CONST}${SYMB_NIL}
+                eval $retvar=$head
+                break
+            elif [[ $token == '.' ]]; then
+                # dotted list reader is not implemented
+                eval $retvar=""; return 1
+            else
+                read_tokens $retvar "$token" || return $?
+                create_cons $retvar ${!retvar} || return $?
+                [[ -n $head ]] && set_cdr $pre ${!retvar} || head=${!retvar}
+                pre=${!retvar}
+            fi
+        done
+    else
+        eval $retvar=\"${TYPE_SYMBOL}$token\"
+    fi
+}
+atom () {
+    # object=$1
+    [[ ${1:0:1} != ${TYPE_CONS} ]]
+}
+consp () {
+    # object=$1
+    [[ ${1:0:1} == ${TYPE_CONS} ]]
+}
+null () {
+    # object=$1
+    [[ $1 == ${TYPE_CONST}${SYMB_NIL} ]]
+}
+_print () {
+    # object=$1
+    local object=$1 car cdr
+    case ${object:0:1} in
+        ${TYPE_CONS} )
+            printf "("
+            while true; do
+                read car cdr <<< ${objects[$object]}
+                _print "$car"
+                if consp "$cdr"; then
+                    object=$cdr
+                    printf " "
+                    continue
+                elif ! null "$cdr"; then
+                    printf " . "
+                    _print "$cdr"
+                fi
+                printf ")"
+                break
+            done
+            ;;
+        ${TYPE_SYMBOL} | ${TYPE_INT} )
+            printf "%s" ${object:1}
+            ;;
+        ${TYPE_STRING} )
+            printf '"%s"' "${objects[$object]}"
+            ;;
+        ${TYPE_CONST} )
+            if null $object; then
+                printf "${SYMB_NIL}"
+            else
+                printf '%s' ${object:1}
+            fi
+            ;;
+        * )
+            printf "<%s>" "${object}"
+            ;;
+    esac
+}
+print () {
+    # object=$1
+    _print $1
+    printf "\n"
+}
+functionp () {
+    [[ ${1:0:1} == ${TYPE_BI_FUNCTION} ]] ||
+    [[ ${1:0:1} == ${TYPE_FUNCTION} ]]
+}
+macro () { [[ ${1:0:1} == ${TYPE_MACRO} ]]; }
+special () { [[ ${1:0:1} == ${TYPE_SPECIAL} ]]; }
+integerp () { [[ ${1:0:1} == ${TYPE_INT} ]]; }
+symbolp () { [[ ${1:0:1} == ${TYPE_SYMBOL} ]]; }
+listp_w_type () {
+    # object=$1 [type=$2]
+    local cons=$1 type=$2 car
+    while consp $cons; do
+        read car cons <<< ${objects[$cons]}
+        [[ -z $type ]] || [[ ${car:0:1} == $type ]] || return 1
+    done
+    null $cons || return 1
+}
+call_lambda () {
+    # retvar=$1 lambda=$2 args=$3
+    local retvar=$1 lambda=$2 args=$3 env arity var vars body arg
+    read env arity vars body <<< ${objects[$lambda]}
+    _check_arity $args '==' $arity || return $?
+    create_environment $retvar $env
+    env=${!retvar}
+    while consp $args; do
+        read arg args <<< ${objects[$args]}
+        read var vars <<< ${objects[$vars]}
+        bind_symbol $env $var $arg
+    done
+    eval_expr $retvar $env $body || return $?
+    #FIXME make effort to clean up temporary environment
+}
+call () {
+    # retvar=$1 current_env=$2 callable=$3 args=$4
+    local retvar=$1 current_env=$2 callable=$3 args=$4
+    case ${callable:0:1} in
+        ${TYPE_SPECIAL} )
+            ${objects[$callable]} $retvar $current_env $args || return $?
+            ;;
+        ${TYPE_BI_FUNCTION} )
+            ${objects[$callable]} $retvar $args || return $?
+            ;;
+        ${TYPE_FUNCTION} | ${TYPE_MACRO} )
+            call_lambda $retvar $callable $args || return $?
+            ;;
+        * )
+            return 1
+    esac
+}
+eval_expr () {
+    # retvar=$1 env=$2 expr=$3
+    local retvar=$1 env=$2 expr=$3 callable args prev car cdr
+    if atom $expr; then
+        case ${expr:0:1} in
+            ${TYPE_SYMBOL} )
+                get_object $retvar $env $expr || return $?
+                ;;
+            ${TYPE_INT} | ${TYPE_STRING} | ${TYPE_CONST} )
+                eval $retvar=$expr
+                ;;
+            * )
+                return 1
+                ;;
+        esac
+        return
+    elif consp $expr; then
+        read car cdr <<< ${objects[$expr]}
+        if symbolp "$car"; then
+            get_object $retvar $env $car || return $?
+        elif consp "$car"; then
+            eval_expr $retvar $env $car || return $?
+        else
+            eval $retvar=""; return 1
+        fi
+
+        callable=${!retvar}
+        if functionp ${callable}; then
+            if null $cdr; then
+                args=${TYPE_CONST}${SYMB_NIL}
+            else
+                prev=""
+                while consp $cdr; do
+                    read car cdr <<< ${objects[$cdr]}
+                    eval_expr $retvar $env $car || return $?
+                    create_cons $retvar ${!retvar} || return $?
+                    [[ -n $prev ]] && set_cdr $prev ${!retvar} || args=${!retvar}
+                    prev=${!retvar}
+                done
+                if ! null $cdr; then
+                    eval $retvar=""; return 1
+                fi
+            fi
+        elif special ${callable} || macro ${callable}; then
+            args=$cdr
+        else
+                eval $retvar=""; return 1
+        fi
+        call $retvar $env $callable $args || return $?
+
+        if macro ${callable}; then
+            eval_expr $retvar $env ${!retvar} || return $?
+        fi
+    fi
+}
+_length () {
+    # "retvar=$1" $object=$2
+    local retvar=$1 object=$2 i=0
+    while consp $object; do
+        read _ object <<< ${objects[$object]}
+        ((i++))
+    done
+    null $object || return 1
+    eval $retvar=$i
+}
+_check_arity () {
+    # args=$1 op=$2 arity=$3
+    local args=$1 op=$2 arity=$3 i=0
+    while consp $args; do
+        read _ args <<< ${objects[$args]}
+        ((i++))
+    done
+    null $args || return 1
+    (($i $op $arity))
+}
+bi_cons () {
+    # retvar=$1 args=$2
+    local retvar=$1 args=$2 a b
+    _check_arity $args '==' '2' || return $?
+    read a b <<< ${objects[$args]}
+    read b _ <<< ${objects[$b]}
+    create_cons $retvar $a $b
+}
+bi_length () {
+    # retvar=$1 args=$2
+    local retvar=$1 args=$2 i=0
+    _check_arity $args '==' '1' || return $?
+    while consp $args; do
+        read _ args <<< ${objects[$args]}
+        ((i++))
+    done
+    null $args || return 1
+    eval $retvar=${TYPE_INT}${i}
+}
+test_single_argument () {
+    # retvar=$1 args=$2 test=$3
+    local retvar=$1 args=$2 test=$3 car
+    _check_arity $args '==' '1' || return $?
+    read car _ <<< ${objects[$args]}
+    if $test $car; then
+        eval $retvar=${TYPE_CONST}${SYMB_T}
+    else
+        eval $retvar=${TYPE_CONST}${SYMB_NIL}
+    fi
+}
+bi_consp () { test_single_argument $1 $2 consp; }
+bi_atom () { test_single_argument $1 $2 atom; }
+bi_null () { test_single_argument $1 $2 null; }
+bi_symbolp () { test_single_argument $1 $2 symbolp; }
+binary_cmp () {
+    # retvar=$1 args=$2 [test=$3]
+    local retvar=$1 args=$2 test=$3 a b r
+    _check_arity $args '==' '2' || return $?
+    read a args <<< ${objects[$args]}
+    read b _ <<< ${objects[$args]}
+    if [[ ${a:0:1} != ${b:0:1} ]]; then
+        r=${SYMB_NIL}
+    elif [[ -z $test ]]; then
+        [[ $a == $b ]] && r=${SYMB_T} || r=${SYMB_NIL}
+    else
+        integerp $a || return 1
+        (( ${a:1} $test ${b:1} )) && r=${SYMB_T} || r=${SYMB_NIL}
+    fi
+    eval $retvar=${TYPE_CONST}$r
+}
+bi_eq () { binary_cmp $1 $2; }
+bi_lt () { binary_cmp $1 $2 '<'; }
+bi_gt () { binary_cmp $1 $2 '>'; }
+bi_le () { binary_cmp $1 $2 '<='; }
+bi_ge () { binary_cmp $1 $2 '>='; }
+nary_op () {
+    # retvar=$1 args=$2 op=$3 acc=$4
+    local retvar=$1 args=$2 op=$3 acc=$4 n a
+    _length $retvar $args || return $?
+    n=${!retvar}
+    while consp $args; do
+        read a args <<< ${objects[$args]}
+        integerp $a || return 1
+        if ((n > 1)); then
+            acc=${a:1}
+            n=0
+            continue
+        fi
+        ((acc = acc ${op} ${a:1}))
+    done
+    eval $retvar=${TYPE_INT}$acc
+}
+bi_add () { nary_op $1 $2 '+' '0'; }
+bi_mul () { nary_op $1 $2 '*' '1'; }
+bi_sub () { nary_op $1 $2 '-' '0'; }
+bi_div () { nary_op $1 $2 '/' '1'; }
+car_cdr () {
+    # retvar=$1 args=$2 car/cdr=$3
+    local retvar=$1 args=$2 field=$3
+    _check_arity $args '==' '1' || return $?
+    read args _ <<< ${objects[$args]}
+    if null $args; then
+        eval $retvar=${TYPE_CONST}${SYMB_NIL}
+    elif consp $args; then
+        if [[ $field == 'car' ]]; then
+            read $retvar _ <<< ${objects[$args]}
+        else
+            read _ $retvar <<< ${objects[$args]}
+        fi
+    else
+        return 1
+    fi
+}
+bi_car () { car_cdr $1 $2 'car'; }
+bi_cdr () { car_cdr $1 $2 'cdr'; }
+bi_list () { eval $1=$2; }
+bi_mapcar () {
+    # retvar=$1 args=$2
+    local retvar=$1 args=$2 callable arg prev head t
+    _check_arity $args '==' '2' || return $?
+    read callable args <<< ${objects[$args]}
+    functionp $callable || return 1
+    read args _ <<<  ${objects[$args]}
+    if null $args; then
+        eval $retvar=${TYPE_SYMBOL}${SYMB_NIL}
+    else
+        while consp $args; do
+            read arg args <<< ${objects[$args]}
+            create_cons $retvar $arg
+            t=${!retvar}
+            call $retvar "" $callable $t || return $?
+            set_car $t ${!retvar}
+            [[ -n $prev ]] && set_cdr $prev $t || head=$t
+            prev=$t
+        done
+        eval $retvar=$head
+    fi
+}
+sp_quote () {
+    # retvar=$1 env=$2 args=$3
+    local retvar=$1 args=$3
+    _check_arity $args '==' '1' || return $?
+    read $retvar _ <<< ${objects[$args]}
+}
+sp_if () {
+    # retvar=$1 env=$2 args=$3
+    local retvar=$1 env=$2 args=$3 car cdr
+    _check_arity $args '==' '3' || return $?
+    read car cdr <<< ${objects[$args]}
+    eval_expr $retvar $env $car || return $?
+    null ${!retvar} && read car cdr <<< ${objects[$cdr]}
+    read car _ <<< ${objects[$cdr]}
+    eval_expr $retvar $env $car || return $?
+}
+sp_and () {
+    # retvar=$1 env=$2 args=$3
+    local retvar=$1 env=$2 args=$3 a
+    eval $retvar=${TYPE_SYMBOL}${SYMB_T}
+    while consp $args; do
+        read a args <<< ${objects[$args]}
+        eval_expr $retvar $env $a || return $?
+        if null ${!retvar}; then
+            break
+        fi
+    done
+}
+sp_or () {
+    # retvar=$1 env=$2 args=$3
+    local retvar=$1 env=$2 args=$3 a
+    eval $retvar=${TYPE_SYMBOL}${SYMB_NIL}
+    while consp $args; do
+        read a args <<< ${objects[$args]}
+        eval_expr $retvar $env $a || return $?
+        if ! null ${!retvar}; then
+            break
+        fi
+    done
+}
+sp_setq () {
+    # retvar=$1 env=$2 args=$3
+    local retvar=$1 env=$2 args=$3 sym x e
+    _check_arity $args '==' '2' || return $?
+    read sym x <<< ${objects[$args]}
+    symbolp "$sym" || return 1
+    if find_containing_environment $retvar $env $sym; then
+	e=${!retvar}
+    else
+	e=${global_env}
+    fi
+    read x _ <<< ${objects[$x]}
+    eval_expr $retvar $env $x
+    bind_symbol $e "$sym" ${!retvar}
+}
+_lambda_or_macro () {
+    # retvar=$1 env=$2 args=$3 type=$4
+    local retvar=$1 env=$2 args=$3 type=$4 vars body t
+    _check_arity $args '==' '2' || return $?
+    read vars t <<< ${objects[$args]}
+    listp_w_type "$vars" ${TYPE_SYMBOL} || return 1
+    read body _ <<< ${objects[$t]}
+    create_lambda_or_macro $retvar $env "$vars" "$body" $type || return $?
+}
+sp_lambda () {
+    # retvar=$1 env=$2 args=$3
+    _lambda_or_macro $1 $2 $3 ${TYPE_FUNCTION}
+}
+sp_macro () {
+    # retvar=$1 env=$2 args=$3
+    _lambda_or_macro $1 $2 $3 ${TYPE_MACRO}
+}
+sp_progn () {
+    # retvar=$1 env=$2 args=$3
+    local retvar=$1 env=$2 args=$3 expr
+    listp_w_type "$args" || return 1
+    while consp $args; do
+	read expr args <<< ${objects[$args]}
+	eval_expr $retvar $env "$expr" || return $?
+    done
+}
+sp_let () {
+    # retvar=$1 env=$2 args=$3
+    local retvar=$1 env=$2 args=$3 varpair var val vars body t let_env
+    _check_arity $args '==' '2' || return $?
+    read vars t <<< ${objects[$args]}
+    read body _ <<< ${objects[$t]}
+    create_environment $retvar $env || return $?
+    let_env=${!retvar}
+    while consp $vars; do
+	read varpair vars <<< ${objects[$vars]}
+	_check_arity "$varpair" '==' 2 || return 1
+	read var t <<< ${objects[$varpair]}
+	symbolp "$var" || return 1
+	read val _ <<< ${objects[$t]}
+	eval_expr $retvar $env "$val" || return $?
+	bind_symbol $let_env $var ${!retvar}
+    done
+    eval_expr $retvar $let_env $body || return $?
+}
+sp_while () {
+    # retvar=$1 env=$2 args=$3
+    local retvar=$1 env=$2 args=$3 pred body t
+    _check_arity $args '==' '2' || return $?
+    read pred t <<< ${objects[$args]}
+    read body _ <<< ${objects[$t]}
+    while true; do
+	eval_expr $retvar $env $pred || return $?
+	null ${!retvar} && break
+	eval_expr $retvar $env $body || return $?
+    done
+}
+sp_eval () {
+    # retvar=$1 env=$2 args=$3
+    local retvar=$1 env=$2 args=$3
+    _check_arity $args '==' '1' || return $?
+    read $retvar _ <<< ${objects[$args]}
+    eval_expr $retvar $env ${!retvar} || return $?
+    eval_expr $retvar $env ${!retvar} || return $?
+}
+
+retvar=${PREF_RETVAR}$((_index++))
+create_environment $retvar
+global_env=${!retvar}
+
+bind_symbol $global_env "${TYPE_SYMBOL}${SYMB_NIL}" "${TYPE_CONST}${SYMB_NIL}"
+bind_symbol $global_env "${TYPE_SYMBOL}${SYMB_T}"   "${TYPE_CONST}${SYMB_T}"
+
+for x in "bi cons"    "bi length"  "bi consp"  "bi atom"   "bi null" \
+         "bi symbolp" "bi + add"   "bi - sub"  "bi * mul"  "bi / div" \
+         "bi = eq"    "bi < lt"    "bi > gt"   "bi <= le"  "bi >= ge" \
+         "bi eq eq"   "bi car"     "bi cdr"    "bi list" \
+         "bi equal"   "bi mapcar"  \
+         "sp and"     "sp or"      "sp eval" \
+         "sp quote"   "sp setq"    "sp if"     "sp progn"  "sp let" \
+         "sp macro"   "sp lambda"  "sp while"
+do
+    read t symb name <<< $x
+    case $t in
+	bi ) type=${TYPE_BI_FUNCTION} ;;
+	sp ) type=${TYPE_SPECIAL} ;;
+    esac
+    bind_symbol $global_env "${TYPE_SYMBOL}${symb}" "${type}${symb}"
+    objects[${type}${symb}]="${t}_${name:-$symb}"
+done
+
+ep () {
+    local retvar=${PREF_RETVAR}$((_index++))
+    read_tokens $retvar <<< $(tokenize <<< "$1")
+    if [[ $? != 0 ]]; then
+	echo "Read failed"
+	return 1
+    fi
+    print ${!retvar}
+    eval_expr $retvar $global_env ${!retvar} && print ${!retvar} || echo "Eval failed"
+    unset $retvar
+    collect
+}
+ep "
+(progn
+;; about 3x slower than builtin version of mapcar
+;  (setq mapcar (lambda (f L)
+;                 (if (consp L)
+;                     (cons (f (car L)) (mapcar f (cdr L)))
+;                   nil)))
+
+  (setq cadr (lambda (L)
+               (car (cdr L))))
+
+  (setq caddr (lambda (L)
+                (car (cdr (cdr L)))))
+
+  (setq not (lambda (p)
+              (if p nil T)))
+
+  (setq ${SYMB_BACKQUOTE} (macro (expr)
+                            (-bq-helper- expr 1)))
+
+  (setq -bq-helper- (lambda (expr depth)
+                      (if (atom expr)
+                          (if (symbolp expr)
+                              (list 'quote expr)
+                            expr)
+                        (if (eq (car expr) '${SYMB_COMMA})
+                            (if (= depth 1)
+                                (cadr expr)
+                              (list '${SYMB_COMMA} (-bq-helper- (cadr expr) (- depth 1))))
+                          (if (eq (car expr) '${SYMB_BACKQUOTE})
+                              (list '${SYMB_BACKQUOTE} (-bq-helper- (cadr expr) (+ depth 1)))
+                            (let ((-bq-h-d- (lambda (e) (-bq-helper- e depth))))
+                              (cons 'list (mapcar -bq-h-d- expr))))))))
+
+  \"This is shlisp!\"
+)"
+
+### Simple testing
+if [[ -n $1 ]]; then
+retvar=${PREF_RETVAR}$((_index++))
+for string in \
+     "(null ())"  "T"  "nil" \
+     "(cons 1 '(2 3))" \
+     '(if T 1 2)'  '(if nil 1 2)' \
+     "(setq a '(1 2 3))" 'a' \
+     '(lambda () "hello world")' \
+     '((lambda () "hello world"))' \
+     '(setq f (lambda () "hello world"))' \
+     '(f)' \
+     "
+(progn
+  (setq x 'decafbad)
+  (setq g (lambda (x)
+            (if (consp x)
+                (car x)
+              (progn
+                (setq x 14)
+                x))))
+  x)" \
+"(g x)" \
+" x " \
+"
+(setq obj (let ((x 1337))
+            (let ((get-x (lambda () x))
+                  (inc-x (lambda (a) (setq x (+ x (if (> a 0) a 1)))))
+                  (reset-x (lambda () (setq x 1337))))
+            (lambda (b) (if (eq b 'get-x)
+                            get-x
+                          (if (eq b 'inc-x)
+                              inc-x
+                            (if (eq b 'reset-x)
+                                reset-x
+                                nil)))))))" \
+"((obj 'get-x))" \
+"((obj 'inc-x) 4)" \
+"((obj 'get-x))" \
+"((obj 'reset-x))" \
+"((obj 'get-x))"
+do
+    echo "<--- ${string}"
+    read_tokens $retvar <<< $(tokenize <<< $string) && \
+       eval_expr $retvar $global_env ${!retvar} && \
+       print ${!retvar} || echo -n "--FAILED"
+    echo
+done
+fi
+
+# repl
+_next_free_fd () {
+    # retvar=$1
+    local retvar=$1
+    local -i i=3
+    while [[ -e /dev/fd/$i ]]; do ((i++)); done
+    eval ${retvar}=${i}
+}
+_not_sourced () { [[ ${FUNCNAME[1]} != 'source' ]]; }
+if _not_sourced; then
+    retvar=${PREF_RETVAR}$((_index++))
+
+    _next_free_fd TOK_IN
+    eval "exec ${TOK_IN}<&0"
+    coproc TOK { tokenize <&${TOK_IN}; }
+
+    _next_free_fd TOK_OUT
+    eval "exec ${TOK_OUT}<&${TOK[0]}"
+    while true; do
+	printf "\n[repl]\n"
+	read_tokens $retvar <&${TOK_OUT} || break
+	if eval_expr $retvar $global_env ${!retvar}; then
+	    print ${!retvar}
+	    collect
+	else
+	    printf "*** COULD NOT EVALUATE EXPRESSION\n"
+	fi
+    done &
+    REPL_PID=$!
+    wait
+fi
