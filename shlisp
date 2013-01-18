@@ -359,7 +359,6 @@ call_lambda () {
         bind_symbol $env $var $arg
     done
     eval_expr $retvar $env $body || return $?
-    #FIXME make effort to clean up temporary environment
 }
 call () {
     # retvar=$1 current_env=$2 callable=$3 args=$4
@@ -424,7 +423,7 @@ eval_expr () {
         elif special ${callable} || macro ${callable}; then
             args=$cdr
         else
-                eval $retvar=""; return 1
+            eval $retvar=""; return 1
         fi
         call $retvar $env $callable $args || return $?
 
@@ -731,14 +730,39 @@ ep () {
 }
 ep "
 (progn
-;; about 3x slower than builtin version of mapcar
+;; Slower than builtin version of mapcar
 ;  (setq mapcar (lambda (f L)
 ;                 (if (consp L)
 ;                     (cons (f (car L)) (mapcar f (cdr L)))
 ;                   nil)))
 
+  (setq append (lambda (L1 L2)
+                 (if (null L1)
+                     L2
+                   (cons (car L1) (append (cdr L1) L2)))))
+
+  (setq reverse (let ((rev-helper nil))
+                  (progn
+                    (setq rev-helper (lambda (L R)
+                                       (if (null L)
+                                           R
+                                         (rev-helper (cdr L) (cons (car L) R)))))
+                    (lambda (L) (rev-helper L ())))))
+
+  (setq caar (lambda (L)
+               (car (car L))))
+
   (setq cadr (lambda (L)
                (car (cdr L))))
+
+  (setq cdar (lambda (L)
+               (cdr (car L))))
+
+  (setq caadr (lambda (L)
+                (car (car (cdr L)))))
+
+  (setq cadar (lambda (L)
+                (car (cdr (car L)))))
 
   (setq caddr (lambda (L)
                 (car (cdr (cdr L)))))
@@ -746,22 +770,32 @@ ep "
   (setq not (lambda (p)
               (if p nil T)))
 
-  (setq ${SYMB_BACKQUOTE} (macro (expr)
-                            (-bq-helper- expr 1)))
-
-  (setq -bq-helper- (lambda (expr depth)
-                      (if (atom expr)
-                          (if (symbolp expr)
-                              (list 'quote expr)
-                            expr)
-                        (if (eq (car expr) '${SYMB_COMMA})
-                            (if (= depth 1)
-                                (cadr expr)
-                              (list '${SYMB_COMMA} (-bq-helper- (cadr expr) (- depth 1))))
-                          (if (eq (car expr) '${SYMB_BACKQUOTE})
-                              (list '${SYMB_BACKQUOTE} (-bq-helper- (cadr expr) (+ depth 1)))
-                            (let ((-bq-h-d- (lambda (e) (-bq-helper- e depth))))
-                              (cons 'list (mapcar -bq-h-d- expr))))))))
+  (setq ${SYMB_BACKQUOTE}
+        (let ((bq-helper nil)
+              (bq-list nil))
+          (progn
+            (setq bq-list (lambda (S tail depth)
+                            (if (null S)
+                                tail
+                              (if (and (consp (car S)) (eq (caar S) '${SYMB_COMMA_AT}))
+                                  (let ((splicee (if (= depth 1)
+                                                    (cadar S)
+                                                  (list '${SYMB_COMMA_AT} (bq-helper (cadar S) (- depth 1))))))
+                                    (bq-list (cdr S) (if (null tail) splicee (list 'append splicee tail)) depth))
+                                (bq-list (cdr S) (list 'cons (bq-helper (car S) depth) tail) depth)))))
+            (setq bq-helper (lambda (S depth)
+                              (if (atom S)
+                                  (if (symbolp S)
+                                      (list 'quote S)
+                                    S)
+                                (if (eq (car S) '${SYMB_COMMA})
+                                    (if (= depth 1)
+                                        (cadr S)
+                                      (list '${SYMB_COMMA} (bq-helper (cadr S) (- depth 1))))
+                                  (if (eq (car S) '${SYMB_BACKQUOTE})
+                                      (list '${SYMB_BACKQUOTE} (bq-helper (cadr S) (+ depth 1)))
+                                    (bq-list (reverse S) () depth))))))
+            (macro (S) (bq-helper S 1)))))
 
   \"This is shlisp!\"
 )"
