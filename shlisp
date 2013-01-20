@@ -224,6 +224,11 @@ tokenize () {
         done
     done
 }
+discard_tokens () {
+    while read -t 0.001; do
+        :
+    done
+}
 read_tokens () {
     # revar=$1 [token="$2"]
     local retvar=$1 token="$2" head pre t
@@ -254,14 +259,19 @@ read_tokens () {
     elif [[ $token == '(' ]]; then
         while true; do
             read token
-            [[ -n $token ]] || return $?
+            [[ -n $token ]] || return 1
             if [[ $token == ')' ]]; then
                 [[ -z $head ]] && head=${TYPE_CONST}${SYMB_NIL}
-                eval $retvar=$head
                 break
             elif [[ $token == '.' ]]; then
-                # dotted list reader is not implemented
-                eval $retvar=""; return 1
+                [[ -n $head ]] || return 1
+                read token
+                [[ $token != ')' ]] || return 1
+                read_tokens $retvar "$token" || return $?
+                read token
+                [[ $token == ')' ]] || return 1
+                set_cdr $pre ${!retvar}
+                break
             else
                 read_tokens $retvar "$token" || return $?
                 create_cons $retvar ${!retvar} || return $?
@@ -269,6 +279,7 @@ read_tokens () {
                 pre=${!retvar}
             fi
         done
+        eval $retvar=$head
     else
         eval $retvar=\"${TYPE_SYMBOL}$token\"
     fi
@@ -858,26 +869,34 @@ _next_free_fd () {
     while [[ -e /dev/fd/$i ]]; do ((i++)); done
     eval ${retvar}=${i}
 }
-_not_sourced () { [[ ${FUNCNAME[1]} != 'source' ]]; }
-if _not_sourced; then
-    retvar=${PREF_RETVAR}$((_index++))
+_sourced () { [[ ${FUNCNAME[1]} == 'source' ]]; }
+if ! _sourced; then
 
     _next_free_fd TOK_IN
     eval "exec ${TOK_IN}<&0"
+
     coproc TOK { tokenize <&${TOK_IN}; }
 
     _next_free_fd TOK_OUT
     eval "exec ${TOK_OUT}<&${TOK[0]}"
+
+    retvar=${PREF_RETVAR}$((_index++))
     while true; do
 	printf "\n[repl]\n"
-	read_tokens $retvar <&${TOK_OUT} || break
-	if eval_expr $retvar $global_env ${!retvar}; then
-	    print ${!retvar}
-	    collect
-	else
-	    printf "*** COULD NOT EVALUATE EXPRESSION\n"
-	fi
+        if read_tokens $retvar <&${TOK_OUT}; then
+	    if eval_expr $retvar $global_env ${!retvar}; then
+	        print ${!retvar}
+	        collect
+	    else
+	        printf "*** COULD NOT EVALUATE EXPRESSION\n"
+	    fi
+        else
+            printf "*** COULD NOT READ EXPRESSION\n"
+            discard_tokens <&${TOK_OUT}
+        fi
     done &
     REPL_PID=$!
-    wait
+
+    wait $TOK_PID
+    kill $REPL_PID
 fi
