@@ -40,6 +40,7 @@ PREF_RETVAR=RV       # Return variable name prefix (internal use)
 
 SYMB_T=T
 SYMB_NIL=nil
+SYMB_QUOTE=quote
 SYMB_BACKQUOTE=-backquote-
 SYMB_COMMA=-bq-comma-
 SYMB_COMMA_AT=-bq-comma-at-
@@ -209,9 +210,11 @@ tokenize () {
         fi
         while ! [[ $line =~ ^\ *$ ]]; do
             # Match opening (
-            [[ $line =~ ^\ *([,@\`\']*\()(.*)$ ]] ||
+            [[ $line =~ ^\ *(\()(.*)$ ]] ||
             # Match closing )
               [[ $line =~ ^\ *(\))(.*)$ ]] ||
+            # Match quote/backquote/unquote-at/unquote
+              [[ $line =~ ^\ *(\'|\`|,@|,)(.*)$ ]] ||
             # Match string (doesn't handle escaped ")
               [[ $line =~ ^\ *([,@\`\']*\"[^\"]*\")(\ .*|\).*|.{0})$ ]] ||
             # Match symbol or number
@@ -237,19 +240,15 @@ read_tokens () {
         [[ -n $token ]] || return $?
     fi
 
-    if [[ ${token:0:1} =~ \'|\`|, ]]; then
-        case ${token:0:1} in
-            \' ) t=quote ;;
+    if [[ ${token} =~ ^(\'|\`|,) ]]; then
+        case ${token} in
+            \' ) t=${SYMB_QUOTE} ;;
             \` ) t=${SYMB_BACKQUOTE} ;;
-            , ) t=${SYMB_COMMA}
-                if [[ ${token:1:1} == @ ]]; then
-                    t=${SYMB_COMMA_AT}
-                    token="${token:1}"
-                fi
-                ;;
+            , )  t=${SYMB_COMMA} ;;
+            ,@ ) t=${SYMB_COMMA_AT} ;;
             * ) return 1
         esac
-        read_tokens $retvar "${token:1}" || return $?
+        read_tokens $retvar || return $?
         create_cons $retvar ${!retvar} || return $?
         create_cons $retvar ${TYPE_SYMBOL}${t} ${!retvar} || return $?
     elif [[ $token =~ ^\"([^\"]*)\"$ ]]; then
