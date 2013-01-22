@@ -34,6 +34,7 @@ TYPE_BI_FUNCTION=f   # f... - Builtin function
 TYPE_MACRO=M         # M... - Macro
 TYPE_SPECIAL=P       # P... - Special builtin operator
 TYPE_SYMBOL=Y        # Y... - Symbol (directly inscribed in ref)
+TYPE_GENSYMBOL=y     # y... - Generated symbol (directly inscribed in ref)
 
 PREF_ENVIRONMENT=ENV # Environment
 PREF_RETVAR=RV       # Return variable name prefix (internal use)
@@ -209,18 +210,19 @@ tokenize () {
             line="${BASH_REMATCH[1]}"
         fi
         while ! [[ $line =~ ^\ *$ ]]; do
+            [[
             # Match opening (
-            [[ $line =~ ^\ *(\()(.*)$ ]] ||
+	        $line =~ ^\ *(\()(.*)$  ||
             # Match closing )
-              [[ $line =~ ^\ *(\))(.*)$ ]] ||
+		$line =~ ^\ *(\))(.*)$  ||
             # Match quote/backquote/unquote-at/unquote
-              [[ $line =~ ^\ *(\'|\`|,@|,)(.*)$ ]] ||
+		$line =~ ^\ *(\'|\`|,@|,)(.*)$  ||
             # Match string (doesn't handle escaped ")
-              [[ $line =~ ^\ *([,@\`\']*\"[^\"]*\")(\ .*|\).*|.{0})$ ]] ||
+		$line =~ ^\ *([,@\`\']*\"[^\"]*\")(\ .*|\).*|.{0})$  ||
             # Match symbol or number
-              [[ $line =~ ^\ *([,@\`\']*[a-zA-Z0-9^#.\!?_~\<\>=|/*+-]+)(\ .*|\).*|.{0})$ ]] ||
+		$line =~ ^\ *([,@\`\']*[a-zA-Z0-9^#.\!?_~\<\>=|/*+-]+)(\ .*|\).*|.{0})$
             # or fail
-              return 1
+	    ]] || return 1
             m="${BASH_REMATCH[1]}"
             line="${BASH_REMATCH[2]}"
             printf "%s\n" "$m"
@@ -340,19 +342,20 @@ print () {
     printf "\n"
 }
 functionp () {
-    [[ ${1:0:1} == ${TYPE_BI_FUNCTION} ]] ||
-    [[ ${1:0:1} == ${TYPE_FUNCTION} ]]
+    [[ ${1:0:1} == ${TYPE_BI_FUNCTION} || ${1:0:1} == ${TYPE_FUNCTION} ]]
 }
 macro () { [[ ${1:0:1} == ${TYPE_MACRO} ]]; }
 special () { [[ ${1:0:1} == ${TYPE_SPECIAL} ]]; }
 integerp () { [[ ${1:0:1} == ${TYPE_INT} ]]; }
-symbolp () { [[ ${1:0:1} == ${TYPE_SYMBOL} ]]; }
+symbolp () {
+    [[ ${1:0:1} == ${TYPE_SYMBOL} || ${1:0:1} == ${TYPE_GENSYMBOL} ]]
+}
 listp_w_type () {
     # object=$1 [type=$2]
     local cons=$1 type=$2 car
     while consp $cons; do
         read car cons <<< ${objects[$cons]}
-        [[ -z $type ]] || [[ ${car:0:1} == $type ]] || return 1
+        [[ -z $type || ${car:0:1} == $type ]] || return 1
     done
     null $cons || return 1
 }
