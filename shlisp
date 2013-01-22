@@ -34,7 +34,7 @@ TYPE_BI_FUNCTION=f   # f... - Builtin function
 TYPE_MACRO=M         # M... - Macro
 TYPE_SPECIAL=P       # P... - Special builtin operator
 TYPE_SYMBOL=Y        # Y... - Symbol (directly inscribed in ref)
-TYPE_GENSYMBOL=y     # y... - Generated symbol (directly inscribed in ref)
+TYPE_GENSYMBOL=G     # G... - Generated symbol (directly inscribed in ref)
 
 PREF_ENVIRONMENT=ENV # Environment
 PREF_RETVAR=RV       # Return variable name prefix (internal use)
@@ -395,17 +395,15 @@ eval_expr () {
     local retvar=$1 env=$2 expr=$3 callable args prev car cdr
     if atom $expr; then
         case ${expr:0:1} in
-            ${TYPE_SYMBOL} )
+            ${TYPE_SYMBOL} | ${TYPE_GENSYMBOL} )
                 get_object $retvar $env $expr || return $?
                 ;;
             ${TYPE_INT} | ${TYPE_STRING} | ${TYPE_CONST} )
                 eval $retvar=$expr
                 ;;
             * )
-                return 1
-                ;;
+                return 1 ;;
         esac
-        return
     elif consp $expr; then
         read car cdr <<< ${objects[$expr]}
         if symbolp "$car"; then
@@ -583,6 +581,12 @@ bi_mapcar () {
         eval $retvar=$head
     fi
 }
+bi_gensym () {
+    # retvar=$1 args=$2
+    local retvar=$1 args=$2
+    _check_arity $args '==' '0' || return $?
+    eval $retvar=${TYPE_GENSYMBOL}$((_index++))
+}
 sp_quote () {
     # retvar=$1 env=$2 args=$3
     local retvar=$1 args=$3
@@ -715,7 +719,7 @@ for x in "bi cons"    "bi length"  "bi consp"  "bi atom"   "bi null" \
          "bi symbolp" "bi + add"   "bi - sub"  "bi * mul"  "bi / div" \
          "bi = eq"    "bi < lt"    "bi > gt"   "bi <= le"  "bi >= ge" \
          "bi eq eq"   "bi car"     "bi cdr"    "bi list" \
-         "bi equal"   "bi mapcar"  \
+         "bi equal"   "bi mapcar"  "bi gensym"\
          "sp and"     "sp or"      "sp eval" \
          "sp quote"   "sp setq"    "sp if"     "sp progn"  "sp let" \
          "sp macro"   "sp lambda"  "sp while"
