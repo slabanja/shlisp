@@ -1,0 +1,39 @@
+(null ())
+T
+nil
+(cons 1 '(2 3))
+(if T 1 2)
+(if nil 1 2)
+(setq a '(1 2 3))
+'a
+(lambda () "hello world")
+((lambda () "hello world"))
+(setq f (lambda () "hello world"))
+(f)
+(progn
+  (setq x 'decafbad)
+  (setq g (lambda (x)
+            (if (consp x)
+                (car x)
+              (progn
+                (setq x 14)
+                x))))
+  x)
+(g x)
+x
+(setq obj (let ((x 1337))
+            (let ((get-x (lambda () x))
+                  (inc-x (lambda (a) (setq x (+ x (if (> a 0) a 1)))))
+                  (reset-x (lambda () (setq x 1337))))
+            (lambda (b) (if (eq b 'get-x)
+                            get-x
+                          (if (eq b 'inc-x)
+                              inc-x
+                            (if (eq b 'reset-x)
+                                reset-x
+                                nil)))))))
+((obj 'get-x))
+((obj 'inc-x) 4)
+((obj 'get-x))
+((obj 'reset-x))
+((obj 'get-x))

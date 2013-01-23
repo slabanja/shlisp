@@ -239,7 +239,7 @@ read_tokens () {
     local retvar=$1 token="$2" head pre t
     if [[ -z $token ]]; then
         read token
-        [[ -n $token ]] || return $?
+        [[ -n $token ]] || return 1
     fi
 
     if [[ ${token} =~ ^(\'|\`|,) ]]; then
@@ -817,56 +817,6 @@ ep "
   \"This is shlisp!\"
 )"
 
-### Simple testing
-if [[ -n $1 ]]; then
-retvar=${PREF_RETVAR}$((_index++))
-for string in \
-     "(null ())"  "T"  "nil" \
-     "(cons 1 '(2 3))" \
-     '(if T 1 2)'  '(if nil 1 2)' \
-     "(setq a '(1 2 3))" 'a' \
-     '(lambda () "hello world")' \
-     '((lambda () "hello world"))' \
-     '(setq f (lambda () "hello world"))' \
-     '(f)' \
-     "
-(progn
-  (setq x 'decafbad)
-  (setq g (lambda (x)
-            (if (consp x)
-                (car x)
-              (progn
-                (setq x 14)
-                x))))
-  x)" \
-"(g x)" \
-" x " \
-"
-(setq obj (let ((x 1337))
-            (let ((get-x (lambda () x))
-                  (inc-x (lambda (a) (setq x (+ x (if (> a 0) a 1)))))
-                  (reset-x (lambda () (setq x 1337))))
-            (lambda (b) (if (eq b 'get-x)
-                            get-x
-                          (if (eq b 'inc-x)
-                              inc-x
-                            (if (eq b 'reset-x)
-                                reset-x
-                                nil)))))))" \
-"((obj 'get-x))" \
-"((obj 'inc-x) 4)" \
-"((obj 'get-x))" \
-"((obj 'reset-x))" \
-"((obj 'get-x))"
-do
-    echo "<--- ${string}"
-    read_tokens $retvar <<< $(tokenize <<< $string) && \
-       eval_expr $retvar $global_env ${!retvar} && \
-       print ${!retvar} || echo -n "--FAILED"
-    echo
-done
-fi
-
 # repl
 _next_free_fd () {
     # retvar=$1
@@ -875,11 +825,13 @@ _next_free_fd () {
     while [[ -e /dev/fd/$i ]]; do ((i++)); done
     eval ${retvar}=${i}
 }
-_sourced () { [[ ${FUNCNAME[1]} == 'source' ]]; }
-if ! _sourced; then
+_repl () {
+    # inputfd=$1
+    local inputfd=$1 terminal
+    [[ -t $inputfd ]] && terminal=true || terminal=false
 
     _next_free_fd TOK_IN
-    eval "exec ${TOK_IN}<&0"
+    eval "exec ${TOK_IN}<&${inputfd}"
 
     coproc TOK { tokenize <&${TOK_IN}; }
 
@@ -888,21 +840,41 @@ if ! _sourced; then
 
     retvar=${PREF_RETVAR}$((_index++))
     while true; do
-	printf "\n[repl]\n"
+	$terminal && printf "\n[repl]\n"
         if read_tokens $retvar <&${TOK_OUT}; then
 	    if eval_expr $retvar $global_env ${!retvar}; then
 	        print ${!retvar}
-	        collect
 	    else
 	        printf "*** COULD NOT EVALUATE EXPRESSION\n"
 	    fi
         else
-            printf "*** COULD NOT READ EXPRESSION\n"
             discard_tokens <&${TOK_OUT}
+            [[ -z $TOK_PID ]] && break
+            printf "*** COULD NOT READ EXPRESSION\n"
+            if ! $terminal; then
+                kill $TOK_PID
+                break
+            fi
         fi
-    done &
-    REPL_PID=$!
+	collect
+    done
 
-    wait $TOK_PID
-    kill $REPL_PID
+    eval "exec ${TOK_IN}<&-"
+    eval "exec ${TOK_OUT}<&-"
+}
+
+_sourced () { [[ ${FUNCNAME[1]} == 'source' ]]; }
+if _sourced; then
+    exit
+fi
+
+if (( ${#} )); then
+    _next_free_fd fd
+    for file in "${@}"; do
+        eval "exec ${fd}<${file}"
+        _repl $fd
+        eval "exec ${fd}<&-"
+    done
+else
+    _repl 0
 fi
