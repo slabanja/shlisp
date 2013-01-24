@@ -733,19 +733,53 @@ do
     objects[${type}${symb}]="${t}_${name:-$symb}"
 done
 
-ep () {
-    local retvar=${PREF_RETVAR}$((_index++))
-    read_tokens $retvar <<< $(tokenize <<< "$1")
-    if [[ $? != 0 ]]; then
-	echo "Read failed"
-	return 1
-    fi
-    print ${!retvar}
-    eval_expr $retvar $global_env ${!retvar} && print ${!retvar} || echo "Eval failed"
-    unset $retvar
-    collect
+_next_free_fd () {
+    # retvar=$1
+    local retvar=$1
+    local -i i=3
+    while [[ -e /dev/fd/$i ]]; do ((i++)); done
+    eval ${retvar}=${i}
 }
-ep "
+repl () {
+    # inputfd=$1
+    local inputfd=$1 terminal
+    [[ -z $inputfd ]] && inputfd=0
+    [[ -t $inputfd ]] && terminal=true || terminal=false
+
+    _next_free_fd TOK_IN
+    eval "exec ${TOK_IN}<&${inputfd}"
+
+    coproc TOK { tokenize <&${TOK_IN}; }
+
+    _next_free_fd TOK_OUT
+    eval "exec ${TOK_OUT}<&${TOK[0]}"
+
+    retvar=${PREF_RETVAR}$((_index++))
+    while true; do
+	$terminal && printf "\n[repl]\n"
+        if read_tokens $retvar <&${TOK_OUT}; then
+	    if eval_expr $retvar $global_env ${!retvar}; then
+	        print ${!retvar}
+	    else
+	        printf "*** COULD NOT EVALUATE EXPRESSION\n"
+	    fi
+        else
+            discard_tokens <&${TOK_OUT}
+            [[ -z $TOK_PID ]] && break
+            printf "*** COULD NOT READ EXPRESSION\n"
+            if ! $terminal; then
+                kill $TOK_PID
+                break
+            fi
+        fi
+	collect
+    done
+
+    eval "exec ${TOK_IN}<&-"
+    eval "exec ${TOK_OUT}<&-"
+}
+
+repl <<_SHLISP_CORE_
 (progn
 ;; Slower than builtin version of mapcar
 ;  (setq mapcar (lambda (f L)
@@ -814,67 +848,19 @@ ep "
                                     (bq-list (reverse S) () depth))))))
             (macro (S) (bq-helper S 1)))))
 
-  \"This is shlisp!\"
-)"
-
-# repl
-_next_free_fd () {
-    # retvar=$1
-    local retvar=$1
-    local -i i=3
-    while [[ -e /dev/fd/$i ]]; do ((i++)); done
-    eval ${retvar}=${i}
-}
-_repl () {
-    # inputfd=$1
-    local inputfd=$1 terminal
-    [[ -t $inputfd ]] && terminal=true || terminal=false
-
-    _next_free_fd TOK_IN
-    eval "exec ${TOK_IN}<&${inputfd}"
-
-    coproc TOK { tokenize <&${TOK_IN}; }
-
-    _next_free_fd TOK_OUT
-    eval "exec ${TOK_OUT}<&${TOK[0]}"
-
-    retvar=${PREF_RETVAR}$((_index++))
-    while true; do
-	$terminal && printf "\n[repl]\n"
-        if read_tokens $retvar <&${TOK_OUT}; then
-	    if eval_expr $retvar $global_env ${!retvar}; then
-	        print ${!retvar}
-	    else
-	        printf "*** COULD NOT EVALUATE EXPRESSION\n"
-	    fi
-        else
-            discard_tokens <&${TOK_OUT}
-            [[ -z $TOK_PID ]] && break
-            printf "*** COULD NOT READ EXPRESSION\n"
-            if ! $terminal; then
-                kill $TOK_PID
-                break
-            fi
-        fi
-	collect
-    done
-
-    eval "exec ${TOK_IN}<&-"
-    eval "exec ${TOK_OUT}<&-"
-}
+  "This is shlisp!")
+_SHLISP_CORE_
 
 _sourced () { [[ ${FUNCNAME[1]} == 'source' ]]; }
 if _sourced; then
     exit
 fi
 
-if (( ${#} )); then
+if (($#)); then
     _next_free_fd fd
     for file in "${@}"; do
-        eval "exec ${fd}<${file}"
-        _repl $fd
-        eval "exec ${fd}<&-"
+        [[ -r $file ]] && repl < "$file"
     done
 else
-    _repl 0
+    repl
 fi
