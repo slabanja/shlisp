@@ -152,17 +152,32 @@ create_string () {
 collect_lambda_or_macro () {
     # lambda=$1
     local lambda=$1 env vars body
-    read env _ vars body <<< ${objects[$lambda]}
+    read env _ _ vars body <<< ${objects[$lambda]}
     ((reference_counter[$env] -= 1))
     ((reference_counter[$vars] -= 1))
     ((reference_counter[$body] -= 1))
     unset objects[$lambda]
     unset reference_counter[$lambda]
 }
+_args_length () {
+    # "retvar=$1" $object=$2
+    local retvar=$1 object=$2 i=0
+    while consp $object; do
+        read _ object <<< ${objects[$object]}
+        ((i++))
+    done
+    if null $object; then
+        eval $retvar="'== $i'"
+    elif symbolp $object; then
+        eval $retvar="'>= $i'"
+    else
+        return 1
+    fi
+}
 create_lambda_or_macro () {
     # retvar=$1 env=$2 vars=$3 body=$4 type=$5
     local retvar=$1 env=$2 vars=$3 body=$4 type=${5} arity t
-    _length $retvar $vars || return 1
+    _args_length $retvar $vars || return 1
     arity=${!retvar}
     t=${type}$((_index++))
     objects[$t]="$env $arity $vars $body"
@@ -359,18 +374,29 @@ listp_w_type () {
     done
     null $cons || return 1
 }
+listp () {
+    # object=$1
+    local cons=$1 car
+    while consp $cons; do
+        read car cons <<< ${objects[$cons]}
+    done
+    null $cons || return 1
+}
 call_lambda () {
     # retvar=$1 lambda=$2 args=$3
-    local retvar=$1 lambda=$2 args=$3 env arity var vars body arg
-    read env arity vars body <<< ${objects[$lambda]}
-    _check_arity $args '==' $arity || return $?
+    local retvar=$1 lambda=$2 args=$3 env aop arity var vars body arg
+    read env aop arity vars body <<< ${objects[$lambda]}
+    _check_arity $args $aop $arity || return $?
     create_environment $retvar $env
     env=${!retvar}
-    while consp $args; do
+    while consp $vars; do
         read arg args <<< ${objects[$args]}
         read var vars <<< ${objects[$vars]}
         bind_symbol $env $var $arg
     done
+    if [[ $aop == '>=' ]]; then
+        bind_symbol $env $vars $args
+    fi
     eval_expr $retvar $env $body || return $?
 }
 call () {
@@ -473,13 +499,20 @@ bi_cons () {
 }
 bi_length () {
     # retvar=$1 args=$2
-    local retvar=$1 args=$2 i=0
+    local retvar=$1 args=$2 i=0 a
     _check_arity $args '==' '1' || return $?
-    while consp $args; do
-        read _ args <<< ${objects[$args]}
-        ((i++))
-    done
-    null $args || return 1
+    read a _ <<< ${objects[$args]}
+    case ${a:0:1} in
+        ${TYPE_CONS} )
+            _length $retvar "$a"
+            i=${!retvar}
+            ;;
+        ${TYPE_STRING} )
+            i=${#objects[$a]}
+            ;;
+        * )
+            return 1 ;;
+    esac
     eval $retvar=${TYPE_INT}${i}
 }
 test_single_argument () {
@@ -644,11 +677,10 @@ sp_setq () {
 }
 _lambda_or_macro () {
     # retvar=$1 env=$2 args=$3 type=$4
-    local retvar=$1 env=$2 args=$3 type=$4 vars body t
+    local retvar=$1 env=$2 args=$3 type=$4 vars body
     _check_arity $args '==' '2' || return $?
-    read vars t <<< ${objects[$args]}
-    listp_w_type "$vars" ${TYPE_SYMBOL} || return 1
-    read body _ <<< ${objects[$t]}
+    read vars args <<< ${objects[$args]}
+    read body _ <<< ${objects[$args]}
     create_lambda_or_macro $retvar $env "$vars" "$body" $type || return $?
 }
 sp_lambda () {
@@ -662,7 +694,7 @@ sp_macro () {
 sp_progn () {
     # retvar=$1 env=$2 args=$3
     local retvar=$1 env=$2 args=$3 expr
-    listp_w_type "$args" || return 1
+    listp "$args" || return 1
     while consp $args; do
 	read expr args <<< ${objects[$args]}
 	eval_expr $retvar $env "$expr" || return $?
@@ -856,8 +888,7 @@ if _sourced; then
     exit
 fi
 
-if (($#)); then
-    _next_free_fd fd
+if (($# > 0)); then
     for file in "${@}"; do
         [[ -r $file ]] && repl < "$file"
     done
