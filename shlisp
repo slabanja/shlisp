@@ -54,8 +54,44 @@ declare -A objects outer_environment reference_counter
 IFS=" "
 set -f
 
-exist () { [[ ${!1+X} ]]; }
+_debug=false
+_error_message=""
+_error_trace=()
+_show_error () {
+    local i
+    if $_debug; then
+        for ((i=$((${#_error_trace[@]}-1)); i >= 0; i--)); do
+            printf "%3i: %s\n" $i "${_error_trace[$i]}"
+        done
+    fi
+    echo "$_error_message"
+    _error_message=""
+    _error_trace=()
+}
+_set_error () {
+    local i=0 bt
+    _error_message=$1
+    while bt=( $(caller $i) ); do
+        _error_trace[$((i++))]=${bt[*]:0:2}
+    done
+}
+while getopts ":hd" optchar; do
+    case $optchar in
+        d ) shift; ((OPTIND--))
+            _debug=true
+            ;;
+        h ) shift; ((OPTIND--))
+            echo "Usage: shlisp [-h] [-d] [FILE] ...
 
+  -h     Show command line options
+  -d     Show internal backtrace upon errors
+"
+            exit
+            ;;
+    esac
+done
+
+exist () { [[ ${!1+X} ]]; }
 collect () {
     # Unset objects not being referred to
     unset IFS # compgen returns newline separated items
@@ -105,7 +141,7 @@ get_object () {
 }
 bind_symbol () {
     # current_env=$1 symbol="$2" object=$3
-    local current_env=$1 symbol="$2" object=$3
+    local current_env=$1 symbol=$2 object=$3
     eval ${current_env}[${symbol}]=\"${object}\"
     ((reference_counter[$object] += 1))
 }
@@ -128,7 +164,7 @@ create_cons () {
 }
 set_car () {
     # cons=$1 car=$2
-    local cons=$1 car="$2" ocar cdr
+    local cons=$1 car=$2 ocar cdr
     read ocar cdr <<< ${objects[$cons]}
     objects[$cons]="${car} ${cdr}"
     ((reference_counter[$ocar] -= 1))
@@ -136,7 +172,7 @@ set_car () {
 }
 set_cdr () {
     # cons=$1 cdr=$2
-    local cons=$1 cdr="$2" ocdr car
+    local cons=$1 cdr=$2 ocdr car
     read car ocdr <<< ${objects[$cons]}
     objects[$cons]="${car} ${cdr}"
     ((reference_counter[$ocdr] -= 1))
@@ -144,7 +180,7 @@ set_cdr () {
 }
 create_string () {
     # retvar=$1 str=$2
-    local retvar=$1 str="$2" t
+    local retvar=$1 str=$2 t
     t=${TYPE_STRING}$((_index++))
     objects[$t]="${str}"
     eval $retvar=$t
@@ -161,9 +197,10 @@ collect_lambda_or_macro () {
 }
 _args_length () {
     # "retvar=$1" $object=$2
-    local retvar=$1 object=$2 i=0
+    local retvar=$1 object=$2 a i=0
     while consp $object; do
-        read _ object <<< ${objects[$object]}
+        read a object <<< ${objects[$object]}
+        symbolp "$a" || { _set_error "$(_print "$a") is not a symbol"; return 1; }
         ((i++))
     done
     if null $object; then
@@ -171,13 +208,13 @@ _args_length () {
     elif symbolp $object; then
         eval $retvar="'>= $i'"
     else
-        return 1
+        _set_error "$(_print "$a") is not a symbol"; return 1
     fi
 }
 create_lambda_or_macro () {
     # retvar=$1 env=$2 vars=$3 body=$4 type=$5
     local retvar=$1 env=$2 vars=$3 body=$4 type=${5} arity t
-    _args_length $retvar $vars || return 1
+    _args_length $retvar $vars || return $?
     arity=${!retvar}
     t=${type}$((_index++))
     objects[$t]="$env $arity $vars $body"
@@ -192,15 +229,15 @@ find_containing_environment () {
     while [[ -n $current_env ]]; do
         if exist "$current_env[${symbol}]"; then
             eval $retvar=$current_env
-            return 0
+            return
         fi
         current_env=${outer_environment[$current_env]}
     done
-    return 1
+    _set_error "Symbol ${symbol:1} has no value"; return 1
 }
 collect_environment () {
     # $1=env
-    local env=$1 x="${1}[@]" o
+    local env=$1 x=${1}[@] o
     for o in ${!x}; do
         ((reference_counter[$o] -= 1))
     done
@@ -251,10 +288,10 @@ discard_tokens () {
 }
 read_tokens () {
     # revar=$1 [token="$2"]
-    local retvar=$1 token="$2" head pre t
+    local retvar=$1 token=$2 head pre t
     if [[ -z $token ]]; then
         read token
-        [[ -n $token ]] || return 1
+        [[ -n $token ]] || { _set_error "Expected token"; return 1; }
     fi
 
     if [[ ${token} =~ ^(\'|\`|,) ]]; then
@@ -263,7 +300,7 @@ read_tokens () {
             \` ) t=${SYMB_BACKQUOTE} ;;
             , )  t=${SYMB_COMMA} ;;
             ,@ ) t=${SYMB_COMMA_AT} ;;
-            * ) return 1
+            * ) { _set_error "Invalid quote construction"; return 1; }
         esac
         read_tokens $retvar || return $?
         create_cons $retvar ${!retvar} || return $?
@@ -275,17 +312,17 @@ read_tokens () {
     elif [[ $token == '(' ]]; then
         while true; do
             read token
-            [[ -n $token ]] || return 1
+            [[ -n $token ]] || { _set_error "Expected token"; return 1; }
             if [[ $token == ')' ]]; then
                 [[ -z $head ]] && head=${TYPE_CONST}${SYMB_NIL}
                 break
             elif [[ $token == '.' ]]; then
-                [[ -n $head ]] || return 1
+                [[ -n $head ]] || { _set_error "List can't start with dot"; return 1; }
                 read token
-                [[ $token != ')' ]] || return 1
+                [[ $token != ')' ]] || { _set_error "List can't end with dot"; return 1; }
                 read_tokens $retvar "$token" || return $?
                 read token
-                [[ $token == ')' ]] || return 1
+                [[ $token == ')' ]] || { _set_error "Malformed dotted list"; return 1; }
                 set_cdr $pre ${!retvar}
                 break
             else
@@ -296,8 +333,10 @@ read_tokens () {
             fi
         done
         eval $retvar=$head
-    else
+    elif [[ $token =~ ^[a-zA-Z^#.\!?_~\<\>=|/*+-]+ ]]; then
         eval $retvar=\"${TYPE_SYMBOL}$token\"
+    else
+        _set_error "Token $token is not a valid object"; return 1
     fi
 }
 atom () {
@@ -428,7 +467,8 @@ eval_expr () {
                 eval $retvar=$expr
                 ;;
             * )
-                return 1 ;;
+                _set_error ""; return 1
+                ;;
         esac
     elif consp $expr; then
         read car cdr <<< ${objects[$expr]}
@@ -437,7 +477,7 @@ eval_expr () {
         elif consp "$car"; then
             eval_expr $retvar $env $car || return $?
         else
-            eval $retvar=""; return 1
+            _set_error "Object $(_print "$car") is not callable"; return 1
         fi
 
         callable=${!retvar}
@@ -454,13 +494,13 @@ eval_expr () {
                     prev=${!retvar}
                 done
                 if ! null $cdr; then
-                    eval $retvar=""; return 1
+                    _set_error "Arguments can't be dotted list"; return 1
                 fi
             fi
         elif special ${callable} || macro ${callable}; then
             args=$cdr
         else
-            eval $retvar=""; return 1
+            _set_error "?"; return 1
         fi
         call $retvar $env $callable $args || return $?
 
@@ -710,9 +750,12 @@ sp_let () {
     let_env=${!retvar}
     while consp $vars; do
 	read varpair vars <<< ${objects[$vars]}
-	_check_arity "$varpair" '==' 2 || return 1
+	_check_arity "$varpair" '==' 2 || {
+            _set_error "let: syntax error in $(_print "$varpair"), should be '(symbol value)'"
+            return 1
+        }
 	read var t <<< ${objects[$varpair]}
-	symbolp "$var" || return 1
+	symbolp "$var" || { _set_error "let: $(_print "$var") is not a symbol"; return 1; }
 	read val _ <<< ${objects[$t]}
 	eval_expr $retvar $env "$val" || return $?
 	bind_symbol $let_env $var ${!retvar}
@@ -794,11 +837,13 @@ repl () {
 	        print ${!retvar}
 	    else
 	        printf "*** COULD NOT EVALUATE EXPRESSION\n"
+                _show_error
 	    fi
         else
             discard_tokens <&${TOK_OUT}
             [[ -z $TOK_PID ]] && break
             printf "*** COULD NOT READ EXPRESSION\n"
+            _show_error
             if ! $terminal; then
                 kill $TOK_PID
                 break
@@ -890,7 +935,7 @@ fi
 
 if (($# > 0)); then
     for file in "${@}"; do
-        [[ -r $file ]] && repl < "$file"
+        [[ -r $file ]] && repl < "$file" || echo "Could not read file $file"
     done
 else
     repl
