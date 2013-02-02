@@ -55,25 +55,33 @@ IFS=" "
 set -f
 
 _debug=false
-_error_message=""
-_error_trace=()
+_clear_error () { _error_trace=(); }
+_clear_error
 _show_error () {
-    local i
-    if $_debug; then
-        for ((i=$((${#_error_trace[@]}-1)); i >= 0; i--)); do
-            printf "%3i: %s\n" $i "${_error_trace[$i]}"
-        done
-    fi
-    echo "$_error_message"
-    _error_message=""
-    _error_trace=()
+    local t i emsg=""
+    for ((i = $((${#_error_trace[@]} - 1)); i >= 0; i--)); do
+        t=( ${_error_trace[$i]} )
+        if $_debug; then
+            printf "%3i: %s\n" $i "${t[*]}"
+        elif ((${#t[@]} > 2)); then
+            emsg="${emsg}  - ${t[@]:2}\n"
+        fi
+    done
+    echo -n -e "$emsg"
+    _clear_error
 }
 _set_error () {
-    local i=0 bt
-    _error_message=$1
-    while bt=( $(caller $i) ); do
-        _error_trace[$((i++))]=${bt[*]:0:2}
-    done
+    local emsg=$1 ind=0 bt
+    if ((${#_error_trace[@]} == 0)); then
+        while bt=( $(caller $ind) ); do
+            _error_trace[$((ind++))]=${bt[*]:0:2}
+        done
+    else
+        while caller $((ind++)) >/dev/null; do :; done
+        ((ind--))
+    fi
+    ((ind = ${#_error_trace[@]} - ind))
+    _error_trace[$ind]="${_error_trace[$ind]}: $emsg"
 }
 while getopts ":hd" optchar; do
     case $optchar in
@@ -136,7 +144,10 @@ collect_object () {
 get_object () {
     # retvar=$1 current_env=$2 symbol=$3
     local retvar=$1 current_env=$2 symbol=$3
-    find_containing_environment $retvar $current_env "${symbol}" || return $?
+    find_containing_environment $retvar $current_env "${symbol}" || {
+        _set_error "Symbol $(_print "${symbol}") has no value"
+        return 1
+    }
     eval $retvar=\"\${${!retvar}[${symbol}]}\"
 }
 bind_symbol () {
@@ -233,7 +244,7 @@ find_containing_environment () {
         fi
         current_env=${outer_environment[$current_env]}
     done
-    _set_error "Symbol ${symbol:1} has no value"; return 1
+    return 1
 }
 collect_environment () {
     # $1=env
@@ -281,17 +292,13 @@ tokenize () {
         done
     done
 }
-discard_tokens () {
-    while read -t 0.001; do
-        :
-    done
-}
+discard_tokens () { while read -t 0.001; do :; done; }
 read_tokens () {
     # revar=$1 [token="$2"]
     local retvar=$1 token=$2 head pre t
     if [[ -z $token ]]; then
         read token
-        [[ -n $token ]] || { _set_error "Expected token"; return 1; }
+        [[ -n $token ]] || return 1
     fi
 
     if [[ ${token} =~ ^(\'|\`|,) ]]; then
@@ -477,7 +484,7 @@ eval_expr () {
         elif consp "$car"; then
             eval_expr $retvar $env $car || return $?
         else
-            _set_error "Object $(_print "$car") is not callable"; return 1
+            _set_error "object $(_print "$car") is not callable"; return 1
         fi
 
         callable=${!retvar}
@@ -494,7 +501,7 @@ eval_expr () {
                     prev=${!retvar}
                 done
                 if ! null $cdr; then
-                    _set_error "Arguments can't be dotted list"; return 1
+                    _set_error "arguments can't be dotted list"; return 1
                 fi
             fi
         elif special ${callable} || macro ${callable}; then
@@ -526,8 +533,7 @@ _check_arity () {
         read _ args <<< ${objects[$args]}
         ((i++))
     done
-    null $args || return 1
-    (($i $op $arity))
+    null $args && (($i $op $arity)) || { _set_error "expected ${op} ${arity} elements"; return 1; }
 }
 bi_cons () {
     # retvar=$1 args=$2
@@ -542,14 +548,15 @@ bi_length () {
     local retvar=$1 args=$2 i=0 a
     _check_arity $args '==' '1' || return $?
     read a _ <<< ${objects[$args]}
-    case ${a:0:1} in
-        ${TYPE_CONS} )
+    case ${a} in
+        ${TYPE_CONS}* )
             _length $retvar "$a"
             i=${!retvar}
             ;;
-        ${TYPE_STRING} )
-            i=${#objects[$a]}
-            ;;
+        ${TYPE_CONST}${SYMB_NIL} )
+            i=0 ;;
+        ${TYPE_STRING}* )
+            i=${#objects[$a]} ;;
         * )
             return 1 ;;
     esac
@@ -751,11 +758,11 @@ sp_let () {
     while consp $vars; do
 	read varpair vars <<< ${objects[$vars]}
 	_check_arity "$varpair" '==' 2 || {
-            _set_error "let: syntax error in $(_print "$varpair"), should be '(symbol value)'"
+            _set_error "syntax error in \"$(_print "$varpair")\", expected '(symbol value)'"
             return 1
         }
 	read var t <<< ${objects[$varpair]}
-	symbolp "$var" || { _set_error "let: $(_print "$var") is not a symbol"; return 1; }
+	symbolp "$var" || { _set_error "$(_print "$var") is not a symbol"; return 1; }
 	read val _ <<< ${objects[$t]}
 	eval_expr $retvar $env "$val" || return $?
 	bind_symbol $let_env $var ${!retvar}
