@@ -53,6 +53,7 @@ declare -A objects outer_environment reference_counter
 
 IFS=" "
 set -f
+shopt -s expand_aliases
 
 _debug=false
 _clear_error () { _error_trace=(); }
@@ -416,11 +417,12 @@ listp () {
     done
     null $cons || return 1
 }
+alias _arity_error='{ _set_error "wrong number of arguments"; return 1; }'
 call_lambda () {
     # retvar=$1 lambda=$2 args=$3
     local retvar=$1 lambda=$2 args=$3 env aop arity var vars body arg
     read env aop arity vars body <<< ${objects[$lambda]}
-    _check_arity $args $aop $arity || return $?
+    _check_arity $args $aop $arity || _arity_error
     create_environment $retvar $env
     env=${!retvar}
     while consp $vars; do
@@ -452,7 +454,7 @@ call () {
 }
 eval_expr () {
     # retvar=$1 env=$2 expr=$3
-    local retvar=$1 env=$2 expr=$3 callable args prev car cdr
+    local retvar=$1 env=$2 expr=$3 head callable args prev car cdr
     if atom $expr; then
         case ${expr:0:1} in
             ${TYPE_SYMBOL} | ${TYPE_GENSYMBOL} )
@@ -466,13 +468,13 @@ eval_expr () {
                 ;;
         esac
     elif consp $expr; then
-        read car cdr <<< ${objects[$expr]}
-        if symbolp "$car"; then
-            get_object $retvar $env $car || return $?
-        elif consp "$car"; then
-            eval_expr $retvar $env $car || return $?
+        read head cdr <<< ${objects[$expr]}
+        if symbolp "$head"; then
+            get_object $retvar $env $head || return $?
+        elif consp "$head"; then
+            eval_expr $retvar $env $head || return $?
         else
-            _set_error "object $(_print "$car") is not callable"; return 1
+            _set_error "object $(_print "$head") is not callable"; return 1
         fi
 
         callable=${!retvar}
@@ -497,10 +499,14 @@ eval_expr () {
         else
             _set_error "?"; return 1
         fi
-        call $retvar $env $callable $args || return $?
+        call $retvar $env $callable $args || {
+            _set_error "could not evaluate $(_print $head)"; return 1
+        }
 
         if macro ${callable}; then
-            eval_expr $retvar $env ${!retvar} || return $?
+            eval_expr $retvar $env ${!retvar} || {
+                _set_error "could not evaluate $(_print $head)"; return 1
+            }
         fi
     fi
 }
@@ -521,12 +527,14 @@ _check_arity () {
         read _ args <<< ${objects[$args]}
         ((i++))
     done
-    null $args && (($i $op $arity)) || { _set_error "expected ${op} ${arity} elements"; return 1; }
+    null $args && (($i $op $arity)) || {
+        _set_error "expected ${op} ${arity}, got $i"; return 1;
+    }
 }
 bi_cons () {
     # retvar=$1 args=$2
     local retvar=$1 args=$2 a b
-    _check_arity $args '==' '2' || return $?
+    _check_arity $args '==' '2' || _arity_error
     read a b <<< ${objects[$args]}
     read b _ <<< ${objects[$b]}
     create_cons $retvar $a $b
@@ -534,7 +542,7 @@ bi_cons () {
 bi_length () {
     # retvar=$1 args=$2
     local retvar=$1 args=$2 i=0 a
-    _check_arity $args '==' '1' || return $?
+    _check_arity $args '==' '1' || _arity_error
     read a _ <<< ${objects[$args]}
     case ${a} in
         ${TYPE_CONS}* )
@@ -553,7 +561,7 @@ bi_length () {
 test_single_argument () {
     # retvar=$1 args=$2 test=$3
     local retvar=$1 args=$2 test=$3 car
-    _check_arity $args '==' '1' || return $?
+    _check_arity $args '==' '1' || _arity_error
     read car _ <<< ${objects[$args]}
     if $test $car; then
         eval $retvar=${TYPE_CONST}${SYMB_T}
@@ -568,7 +576,7 @@ bi_symbolp () { test_single_argument $1 $2 symbolp; }
 binary_cmp () {
     # retvar=$1 args=$2 [test=$3]
     local retvar=$1 args=$2 test=$3 a b r
-    _check_arity $args '==' '2' || return $?
+    _check_arity $args '==' '2' || _arity_error
     read a args <<< ${objects[$args]}
     read b _ <<< ${objects[$args]}
     if [[ ${a:0:1} != ${b:0:1} ]]; then
@@ -610,7 +618,7 @@ bi_div () { nary_op $1 $2 '/' '1'; }
 car_cdr () {
     # retvar=$1 args=$2 car/cdr=$3
     local retvar=$1 args=$2 field=$3
-    _check_arity $args '==' '1' || return $?
+    _check_arity $args '==' '1' || _arity_error
     read args _ <<< ${objects[$args]}
     if null $args; then
         eval $retvar=${TYPE_CONST}${SYMB_NIL}
@@ -630,7 +638,7 @@ bi_list () { eval $1=$2; }
 bi_mapcar () {
     # retvar=$1 args=$2
     local retvar=$1 args=$2 callable arg prev head t
-    _check_arity $args '==' '2' || return $?
+    _check_arity $args '==' '2' || _arity_error
     read callable args <<< ${objects[$args]}
     functionp $callable || return 1
     read args _ <<<  ${objects[$args]}
@@ -652,19 +660,19 @@ bi_mapcar () {
 bi_gensym () {
     # retvar=$1 args=$2
     local retvar=$1 args=$2
-    _check_arity $args '==' '0' || return $?
+    _check_arity $args '==' '0' || _arity_error
     eval $retvar=${TYPE_GENSYMBOL}$((_index++))
 }
 sp_quote () {
     # retvar=$1 env=$2 args=$3
     local retvar=$1 args=$3
-    _check_arity $args '==' '1' || return $?
+    _check_arity $args '==' '1' || _arity_error
     read $retvar _ <<< ${objects[$args]}
 }
 sp_if () {
     # retvar=$1 env=$2 args=$3
     local retvar=$1 env=$2 args=$3 car cdr
-    _check_arity $args '==' '3' || return $?
+    _check_arity $args '==' '3' || _arity_error
     read car cdr <<< ${objects[$args]}
     eval_expr $retvar $env $car || return $?
     null ${!retvar} && read car cdr <<< ${objects[$cdr]}
@@ -698,7 +706,7 @@ sp_or () {
 sp_setq () {
     # retvar=$1 env=$2 args=$3
     local retvar=$1 env=$2 args=$3 sym x e
-    _check_arity $args '==' '2' || return $?
+    _check_arity $args '==' '2' || _arity_error
     read sym x <<< ${objects[$args]}
     symbolp "$sym" || return 1
     if find_containing_environment $retvar $env $sym; then
@@ -713,7 +721,7 @@ sp_setq () {
 _lambda_or_macro () {
     # retvar=$1 env=$2 args=$3 type=$4
     local retvar=$1 env=$2 args=$3 type=$4 vars body
-    _check_arity $args '==' '2' || return $?
+    _check_arity $args '==' '2' || _arity_error
     read vars args <<< ${objects[$args]}
     read body _ <<< ${objects[$args]}
     create_lambda_or_macro $retvar $env "$vars" "$body" $type || return $?
@@ -738,7 +746,7 @@ sp_progn () {
 sp_let () {
     # retvar=$1 env=$2 args=$3
     local retvar=$1 env=$2 args=$3 varpair var val vars body t let_env
-    _check_arity $args '==' '2' || return $?
+    _check_arity $args '==' '2' || _arity_error
     read vars t <<< ${objects[$args]}
     read body _ <<< ${objects[$t]}
     create_environment $retvar $env || return $?
@@ -760,7 +768,7 @@ sp_let () {
 sp_while () {
     # retvar=$1 env=$2 args=$3
     local retvar=$1 env=$2 args=$3 pred body t
-    _check_arity $args '==' '2' || return $?
+    _check_arity $args '==' '2' || _arity_error
     read pred t <<< ${objects[$args]}
     read body _ <<< ${objects[$t]}
     while true; do
@@ -772,7 +780,7 @@ sp_while () {
 sp_eval () {
     # retvar=$1 env=$2 args=$3
     local retvar=$1 env=$2 args=$3
-    _check_arity $args '==' '1' || return $?
+    _check_arity $args '==' '1' || _arity_error
     read $retvar _ <<< ${objects[$args]}
     eval_expr $retvar $env ${!retvar} || return $?
     eval_expr $retvar $env ${!retvar} || return $?
