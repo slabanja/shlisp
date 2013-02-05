@@ -50,3 +50,5 @@ x
 (length ())
 (length "")
 (length '(1 2 3))
+(cond (nil 1) (T 2))
+(cond ((+ 1 2) (+ 4 5)))

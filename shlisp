@@ -28,7 +28,6 @@ fi
 TYPE_CONS=C          # C... - Cons cell
 TYPE_INT=I           # I... - Int (directly inscribed in ref)
 TYPE_STRING=S        # S... - String
-TYPE_CONST=B         # B... - Builtin constant
 TYPE_FUNCTION=F      # F... - Function/lambda
 TYPE_BI_FUNCTION=f   # f... - Builtin function
 TYPE_MACRO=M         # M... - Macro
@@ -173,7 +172,7 @@ collect_cons () {
 }
 create_cons () {
     # retvar=$1 car=$2 cdr=$3
-    local retvar=$1 car=$2 cdr=${3:-${TYPE_CONST}${SYMB_NIL}} object=${TYPE_CONS}$((_index++))
+    local retvar=$1 car=$2 cdr=${3:-${TYPE_SYMBOL}${SYMB_NIL}} object=${TYPE_CONS}$((_index++))
     objects[${object}]="${car} ${cdr}"
     eval $retvar=${object}
     ((reference_counter[$car] += 1))
@@ -328,7 +327,7 @@ read_tokens () {
             read token
             [[ -n $token ]] || { _set_error "Expected token"; return 1; }
             if [[ $token == ')' ]]; then
-                [[ -z $head ]] && head=${TYPE_CONST}${SYMB_NIL}
+                [[ -z $head ]] && head=${TYPE_SYMBOL}${SYMB_NIL}
                 break
             elif [[ $token == '.' ]]; then
                 [[ -n $head ]] || { _set_error "list can't start with dot"; return 1; }
@@ -363,7 +362,7 @@ consp () {
 }
 null () {
     # object=$1
-    [[ $1 == ${TYPE_CONST}${SYMB_NIL} ]]
+    [[ $1 == ${TYPE_SYMBOL}${SYMB_NIL} ]]
 }
 _print () {
     # object=$1
@@ -391,13 +390,6 @@ _print () {
             ;;
         ${TYPE_STRING} )
             printf '"%s"' "${objects[$object]}"
-            ;;
-        ${TYPE_CONST} )
-            if null $object; then
-                printf "${SYMB_NIL}"
-            else
-                printf '%s' ${object:1}
-            fi
             ;;
         * )
             printf "<%s>" "${object}"
@@ -460,12 +452,12 @@ eval_expr () {
     # retvar=$1 env=$2 expr=$3
     local retvar=$1 env=$2 expr=$3 head callable args prev car cdr
     if atom $expr; then
-        case ${expr:0:1} in
-            ${TYPE_SYMBOL} | ${TYPE_GENSYMBOL} )
-                get_object $retvar $env $expr || return $?
-                ;;
-            ${TYPE_INT} | ${TYPE_STRING} | ${TYPE_CONST} )
+        case $expr in
+            ${TYPE_INT}* | ${TYPE_STRING}* | ${TYPE_SYMBOL}${SYMB_NIL} | ${TYPE_SYMBOL}${SYMB_T} )
                 eval $retvar=$expr
+                ;;
+            ${TYPE_SYMBOL}* | ${TYPE_GENSYMBOL}* )
+                get_object $retvar $env $expr || return $?
                 ;;
             * )
                 _set_error ""; return 1
@@ -484,7 +476,7 @@ eval_expr () {
         callable=${!retvar}
         if functionp ${callable}; then
             if null $cdr; then
-                args=${TYPE_CONST}${SYMB_NIL}
+                args=${TYPE_SYMBOL}${SYMB_NIL}
             else
                 prev=""
                 while consp $cdr; do
@@ -558,7 +550,7 @@ bi_length () {
             _length $retvar $a
             i=${!retvar}
             ;;
-        ${TYPE_CONST}${SYMB_NIL} )
+        ${TYPE_SYMBOL}${SYMB_NIL} )
             i=0 ;;
         ${TYPE_STRING}* )
             i=${#objects[$a]} ;;
@@ -573,9 +565,9 @@ test_single_argument () {
     _check_arity $args '==' '1' || _arity_error
     read car _ <<< ${objects[$args]}
     if $test $car; then
-        eval $retvar=${TYPE_CONST}${SYMB_T}
+        eval $retvar=${TYPE_SYMBOL}${SYMB_T}
     else
-        eval $retvar=${TYPE_CONST}${SYMB_NIL}
+        eval $retvar=${TYPE_SYMBOL}${SYMB_NIL}
     fi
 }
 bi_consp () { test_single_argument $1 $2 consp; }
@@ -596,7 +588,7 @@ binary_cmp () {
         integerp $a || return 1
         (( ${a:1} $test ${b:1} )) && r=${SYMB_T} || r=${SYMB_NIL}
     fi
-    eval $retvar=${TYPE_CONST}$r
+    eval $retvar=${TYPE_SYMBOL}$r
 }
 bi_eq () { binary_cmp $1 $2; }
 bi_lt () { binary_cmp $1 $2 '<'; }
@@ -630,7 +622,7 @@ car_cdr () {
     _check_arity $args '==' '1' || _arity_error
     read args _ <<< ${objects[$args]}
     if null $args; then
-        eval $retvar=${TYPE_CONST}${SYMB_NIL}
+        eval $retvar=${TYPE_SYMBOL}${SYMB_NIL}
     elif consp $args; then
         if [[ $field == 'car' ]]; then
             read $retvar _ <<< ${objects[$args]}
@@ -799,8 +791,8 @@ retvar=${PREF_RETVAR}$((_index++))
 create_environment $retvar
 global_env=${!retvar}
 
-bind_symbol $global_env "${TYPE_SYMBOL}${SYMB_NIL}" "${TYPE_CONST}${SYMB_NIL}"
-bind_symbol $global_env "${TYPE_SYMBOL}${SYMB_T}"   "${TYPE_CONST}${SYMB_T}"
+bind_symbol $global_env "${TYPE_SYMBOL}${SYMB_NIL}" "${TYPE_SYMBOL}${SYMB_NIL}"
+bind_symbol $global_env "${TYPE_SYMBOL}${SYMB_T}"   "${TYPE_SYMBOL}${SYMB_T}"
 
 for x in "bi cons"    "bi length"  "bi consp"  "bi atom"   "bi null" \
          "bi symbolp" "bi + add"   "bi - sub"  "bi * mul"  "bi / div" \
@@ -948,6 +940,17 @@ repl <<_SHLISP_CORE_END_
                                      ,@(if (= 1 (length body))
                                            body
                                          (cons (cons 'progn body) ()))))))
+
+  (let ((helper nil))
+    (progn
+      (setq helper (lambda (pairs)
+                     (if (eq (caar pairs) T)
+                         (cadar pairs)
+                       (list 'if (caar pairs) (cadar pairs)
+                             (if (null (cdr pairs))
+                                 nil
+                               (helper (cdr pairs)))))))
+      (defmacro cond pairs (helper pairs))))
 
   "This is shlisp!")
 _SHLISP_CORE_END_
