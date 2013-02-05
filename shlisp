@@ -46,16 +46,36 @@ SYMB_BACKQUOTE=-backquote-
 SYMB_COMMA=-bq-comma-
 SYMB_COMMA_AT=-bq-comma-at-
 
-declare -i _index=0
-unset IFS
+IFS=" "
 unset objects outer_environment
+declare -i _index=0
 declare -A objects outer_environment reference_counter
 
-IFS=" "
 set -f
 shopt -s expand_aliases
 
 _debug=false
+_interactive=false
+while getopts ":hdi" optchar; do
+    [[ -n $OPTARG ]] && continue
+    case $optchar in
+        d ) _debug=true ;;
+        i ) _interactive=true ;;
+        h ) echo "Usage: shlisp [-h] [-d] [-i] [FILE] ...
+
+  -h     Show command line options
+  -d     Show internal information, such as a backtrace upon errors
+  -i     Launch interactive read-eval-print-loop (default if no files specified)
+"
+            exit
+            ;;
+    esac
+    set -- "${@:1:$((OPTIND-2))}" "${@:$((OPTIND))}"
+    ((OPTIND--))
+done
+
+alias _arity_error='{ _set_error "wrong number of arguments"; return 1; }'
+alias _general_error='{ _set_error "error"; return 1; }'
 _clear_error () { _error_trace=(); }
 _clear_error
 _show_error () {
@@ -84,21 +104,6 @@ _set_error () {
     ((ind = ${#_error_trace[@]} - ind))
     _error_trace[$ind]="${_error_trace[$ind]}: $emsg"
 }
-while getopts ":hd" optchar; do
-    case $optchar in
-        d ) shift; ((OPTIND--))
-            _debug=true
-            ;;
-        h ) shift; ((OPTIND--))
-            echo "Usage: shlisp [-h] [-d] [FILE] ...
-
-  -h     Show command line options
-  -d     Show internal information, such as a backtrace upon errors
-"
-            exit
-            ;;
-    esac
-done
 
 exist () { [[ ${!1+X} ]]; }
 collect () {
@@ -106,7 +111,7 @@ collect () {
     unset IFS # compgen returns newline separated items
     local -i aggregated=0 objects_collected i
     for ((i=0; i < 10; i++)); do
-	((objects_collected=0))
+        ((objects_collected=0))
         for o in $(compgen -v ${PREF_ENVIRONMENT}) ${!objects[@]}; do
             if ((${reference_counter[$o]:-0} == 0)); then
                 collect_object $o
@@ -213,7 +218,7 @@ _args_length () {
     tail=$object
     while consp $tail; do
         read s tail <<< ${objects[$tail]}
-        symbolp "$s" || { _set_error "$(_print "$s") is not a symbol"; return 1; }
+        symbolp $s || { _set_error "$(_print "$s") is not a symbol"; return 1; }
         ((i++))
     done
     if null $tail; then
@@ -221,7 +226,7 @@ _args_length () {
     elif symbolp $tail; then
         eval $retvar="'>= $i'"
     else
-        _set_error "$(_print "$object") is neither list, dotted list, or symbol"; return 1
+        _set_error "$(_print $object) is neither list, dotted list, or symbol"; return 1
     fi
 }
 create_lambda_or_macro () {
@@ -277,17 +282,17 @@ tokenize () {
         while ! [[ $line =~ ^\ *$ ]]; do
             [[
             # Match opening (
-	        $line =~ ^\ *(\()(.*)$  ||
+                $line =~ ^\ *(\()(.*)$  ||
             # Match closing )
-		$line =~ ^\ *(\))(.*)$  ||
+                $line =~ ^\ *(\))(.*)$  ||
             # Match quote/backquote/unquote-at/unquote
-		$line =~ ^\ *(\'|\`|,@|,)(.*)$  ||
+                $line =~ ^\ *(\'|\`|,@|,)(.*)$  ||
             # Match string (doesn't handle escaped ")
-		$line =~ ^\ *([,@\`\']*\"[^\"]*\")(\ .*|\).*|.{0})$  ||
+                $line =~ ^\ *([,@\`\']*\"[^\"]*\")(\ .*|\).*|.{0})$  ||
             # Match symbol or number
-		$line =~ ^\ *([,@\`\']*[a-zA-Z0-9^#.\!?_~\<\>=|/*+-]+)(\ .*|\).*|.{0})$
+                $line =~ ^\ *([,@\`\']*[a-zA-Z0-9^#.\!?_~\<\>=|/*+-]+)(\ .*|\).*|.{0})$
             # or fail
-	    ]] || return 1
+            ]] || return 1
             m="${BASH_REMATCH[1]}"
             line="${BASH_REMATCH[2]}"
             printf "%s\n" "$m"
@@ -309,7 +314,7 @@ read_tokens () {
             \` ) t=${SYMB_BACKQUOTE} ;;
             , )  t=${SYMB_COMMA} ;;
             ,@ ) t=${SYMB_COMMA_AT} ;;
-            * ) { _set_error "Invalid quote construction"; return 1; }
+            * ) { _set_error "invalid quote construction"; return 1; }
         esac
         read_tokens $retvar || return $?
         create_cons $retvar ${!retvar} || return $?
@@ -326,12 +331,12 @@ read_tokens () {
                 [[ -z $head ]] && head=${TYPE_CONST}${SYMB_NIL}
                 break
             elif [[ $token == '.' ]]; then
-                [[ -n $head ]] || { _set_error "List can't start with dot"; return 1; }
+                [[ -n $head ]] || { _set_error "list can't start with dot"; return 1; }
                 read token
-                [[ $token != ')' ]] || { _set_error "List can't end with dot"; return 1; }
+                [[ $token != ')' ]] || { _set_error "list can't end with dot"; return 1; }
                 read_tokens $retvar "$token" || return $?
                 read token
-                [[ $token == ')' ]] || { _set_error "Malformed dotted list"; return 1; }
+                [[ $token == ')' ]] || { _set_error "malformed dotted list"; return 1; }
                 set_cdr $pre ${!retvar}
                 break
             else
@@ -368,14 +373,14 @@ _print () {
             printf "("
             while true; do
                 read car cdr <<< ${objects[$object]}
-                _print "$car"
-                if consp "$cdr"; then
+                _print $car
+                if consp $cdr; then
                     object=$cdr
                     printf " "
                     continue
-                elif ! null "$cdr"; then
+                elif ! null $cdr; then
                     printf " . "
-                    _print "$cdr"
+                    _print $cdr
                 fi
                 printf ")"
                 break
@@ -417,7 +422,6 @@ listp () {
     done
     null $cons || return 1
 }
-alias _arity_error='{ _set_error "wrong number of arguments"; return 1; }'
 call_lambda () {
     # retvar=$1 lambda=$2 args=$3
     local retvar=$1 lambda=$2 args=$3 env aop arity var vars body arg
@@ -469,12 +473,12 @@ eval_expr () {
         esac
     elif consp $expr; then
         read head cdr <<< ${objects[$expr]}
-        if symbolp "$head"; then
+        if symbolp $head; then
             get_object $retvar $env $head || return $?
-        elif consp "$head"; then
+        elif consp $head; then
             eval_expr $retvar $env $head || return $?
         else
-            _set_error "object $(_print "$head") is not callable"; return 1
+            _set_error "object $(_print $head) is not callable"; return 1
         fi
 
         callable=${!retvar}
@@ -494,20 +498,25 @@ eval_expr () {
                     _set_error "arguments can't be dotted list"; return 1
                 fi
             fi
-        elif special ${callable} || macro ${callable}; then
+        elif special ${callable}; then
             args=$cdr
+	elif macro ${callable}; then
+            call $retvar $env $callable $cdr || _general_error
+	    if consp ${!retvar}; then
+		read car cdr <<< ${objects[${!retvar}]}
+		set_car $expr $car
+		set_cdr $expr $cdr
+	    else
+		expr=${!retvar}
+	    fi
+	    eval_expr $retvar $env $expr || _general_error
+	    return
         else
-            _set_error "?"; return 1
+            _general_error
         fi
         call $retvar $env $callable $args || {
             _set_error "could not evaluate $(_print $head)"; return 1
         }
-
-        if macro ${callable}; then
-            eval_expr $retvar $env ${!retvar} || {
-                _set_error "could not evaluate $(_print $head)"; return 1
-            }
-        fi
     fi
 }
 _length () {
@@ -546,7 +555,7 @@ bi_length () {
     read a _ <<< ${objects[$args]}
     case ${a} in
         ${TYPE_CONS}* )
-            _length $retvar "$a"
+            _length $retvar $a
             i=${!retvar}
             ;;
         ${TYPE_CONST}${SYMB_NIL} )
@@ -708,11 +717,11 @@ sp_setq () {
     local retvar=$1 env=$2 args=$3 sym x e
     _check_arity $args '==' '2' || _arity_error
     read sym x <<< ${objects[$args]}
-    symbolp "$sym" || return 1
+    symbolp $sym || return 1
     if find_containing_environment $retvar $env $sym; then
-	e=${!retvar}
+        e=${!retvar}
     else
-	e=${global_env}
+        e=${global_env}
     fi
     read x _ <<< ${objects[$x]}
     eval_expr $retvar $env $x
@@ -739,8 +748,8 @@ sp_progn () {
     local retvar=$1 env=$2 args=$3 expr
     listp "$args" || return 1
     while consp $args; do
-	read expr args <<< ${objects[$args]}
-	eval_expr $retvar $env "$expr" || return $?
+        read expr args <<< ${objects[$args]}
+        eval_expr $retvar $env "$expr" || return $?
     done
 }
 sp_let () {
@@ -752,16 +761,16 @@ sp_let () {
     create_environment $retvar $env || return $?
     let_env=${!retvar}
     while consp $vars; do
-	read varpair vars <<< ${objects[$vars]}
-	_check_arity "$varpair" '==' 2 || {
+        read varpair vars <<< ${objects[$vars]}
+        _check_arity "$varpair" '==' 2 || {
             _set_error "syntax error in \"$(_print "$varpair")\", expected '(symbol value)'"
             return 1
         }
-	read var t <<< ${objects[$varpair]}
-	symbolp "$var" || { _set_error "$(_print "$var") is not a symbol"; return 1; }
-	read val _ <<< ${objects[$t]}
-	eval_expr $retvar $env "$val" || return $?
-	bind_symbol $let_env $var ${!retvar}
+        read var t <<< ${objects[$varpair]}
+        symbolp $var || { _set_error "$(_print "$var") is not a symbol"; return 1; }
+        read val _ <<< ${objects[$t]}
+        eval_expr $retvar $env "$val" || return $?
+        bind_symbol $let_env $var ${!retvar}
     done
     eval_expr $retvar $let_env $body || return $?
 }
@@ -772,9 +781,9 @@ sp_while () {
     read pred t <<< ${objects[$args]}
     read body _ <<< ${objects[$t]}
     while true; do
-	eval_expr $retvar $env $pred || return $?
-	null ${!retvar} && break
-	eval_expr $retvar $env $body || return $?
+        eval_expr $retvar $env $pred || return $?
+        null ${!retvar} && break
+        eval_expr $retvar $env $body || return $?
     done
 }
 sp_eval () {
@@ -804,8 +813,8 @@ for x in "bi cons"    "bi length"  "bi consp"  "bi atom"   "bi null" \
 do
     read t symb name <<< $x
     case $t in
-	bi ) type=${TYPE_BI_FUNCTION} ;;
-	sp ) type=${TYPE_SPECIAL} ;;
+        bi ) type=${TYPE_BI_FUNCTION} ;;
+        sp ) type=${TYPE_SPECIAL} ;;
     esac
     bind_symbol $global_env "${TYPE_SYMBOL}${symb}" "${type}${symb}"
     objects[${type}${symb}]="${t}_${name:-$symb}"
@@ -834,14 +843,14 @@ repl () {
 
     retvar=${PREF_RETVAR}$((_index++))
     while true; do
-	$terminal && printf "\n[repl]\n"
+        $terminal && printf "\n[repl]\n"
         if read_tokens $retvar <&${TOK_OUT}; then
-	    if eval_expr $retvar $global_env ${!retvar}; then
-	        print ${!retvar}
-	    else
-	        printf "*** COULD NOT EVALUATE EXPRESSION\n"
+            if eval_expr $retvar $global_env ${!retvar}; then
+                print ${!retvar}
+            else
+                printf "*** COULD NOT EVALUATE EXPRESSION\n"
                 _show_error
-	    fi
+            fi
         else
             discard_tokens <&${TOK_OUT}
             [[ -z $TOK_PID ]] && break
@@ -852,14 +861,14 @@ repl () {
                 break
             fi
         fi
-	collect
+        collect
     done
 
     eval "exec ${TOK_IN}<&-"
     eval "exec ${TOK_OUT}<&-"
 }
 
-repl <<_SHLISP_CORE_
+repl <<_SHLISP_CORE_END_
 (progn
 ;; Slower than builtin version of mapcar
 ;  (setq mapcar (lambda (f L)
@@ -928,8 +937,20 @@ repl <<_SHLISP_CORE_
                                     (bq-list (reverse S) () depth))))))
             (macro (S) (bq-helper S 1)))))
 
+  (setq defun (macro (fn args . body)
+                     \`(setq ,fn (lambda ,args
+                                  ,@(if (= 1 (length body))
+                                        body
+                                      (cons (cons 'progn body) ()))))))
+
+  (setq defmacro (macro (fn args . body)
+                        \`(setq ,fn (macro ,args
+                                     ,@(if (= 1 (length body))
+                                           body
+                                         (cons (cons 'progn body) ()))))))
+
   "This is shlisp!")
-_SHLISP_CORE_
+_SHLISP_CORE_END_
 
 _sourced () { [[ ${FUNCNAME[1]} == 'source' ]]; }
 if _sourced; then
@@ -940,6 +961,8 @@ if (($# > 0)); then
     for file in "${@}"; do
         [[ -r $file ]] && repl < "$file" || echo "*** COULD NOT READ FILE $file"
     done
-else
+fi
+
+if (($# == 0)) || $_interactive; then
     repl
 fi
