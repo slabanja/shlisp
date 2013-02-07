@@ -429,7 +429,7 @@ call_lambda () {
     if [[ $aop == '>=' ]]; then
         bind_symbol $env $vars $args
     fi
-    eval_expr $retvar $env $body || return $?
+    sp_progn $retvar $env $body || return $?
 }
 call () {
     # retvar=$1 current_env=$2 callable=$3 args=$4
@@ -716,16 +716,15 @@ sp_setq () {
         e=${global_env}
     fi
     read x _ <<< ${objects[$x]}
-    eval_expr $retvar $env $x
+    eval_expr $retvar $env $x || return $?
     bind_symbol $e "$sym" ${!retvar}
 }
 _lambda_or_macro () {
     # retvar=$1 env=$2 args=$3 type=$4
-    local retvar=$1 env=$2 args=$3 type=$4 vars body
-    _check_arity $args '==' '2' || _arity_error
-    read vars args <<< ${objects[$args]}
-    read body _ <<< ${objects[$args]}
-    create_lambda_or_macro $retvar $env "$vars" "$body" $type || return $?
+    local retvar=$1 env=$2 argsbody=$3 type=$4 vars
+    _check_arity $argsbody '>=' '2' || _arity_error
+    read vars argsbody <<< ${objects[$argsbody]}
+    create_lambda_or_macro $retvar $env "$vars" "$argsbody" $type || return $?
 }
 sp_lambda () {
     # retvar=$1 env=$2 args=$3
@@ -747,9 +746,8 @@ sp_progn () {
 sp_let () {
     # retvar=$1 env=$2 args=$3
     local retvar=$1 env=$2 args=$3 varpair var val vars body t let_env
-    _check_arity $args '==' '2' || _arity_error
-    read vars t <<< ${objects[$args]}
-    read body _ <<< ${objects[$t]}
+    _check_arity $args '>=' '2' || _arity_error
+    read vars body <<< ${objects[$args]}
     create_environment $retvar $env || return $?
     let_env=${!retvar}
     while consp $vars; do
@@ -764,7 +762,7 @@ sp_let () {
         eval_expr $retvar $env "$val" || return $?
         bind_symbol $let_env $var ${!retvar}
     done
-    eval_expr $retvar $let_env $body || return $?
+    sp_progn $retvar $let_env $body || return $?
 }
 sp_while () {
     # retvar=$1 env=$2 args=$3
@@ -862,24 +860,17 @@ repl () {
 
 repl <<_SHLISP_CORE_END_
 (progn
-;; Slower than builtin version of mapcar
-;  (setq mapcar (lambda (f L)
-;                 (if (consp L)
-;                     (cons (f (car L)) (mapcar f (cdr L)))
-;                   nil)))
-
   (setq append (lambda (L1 L2)
                  (if (null L1)
                      L2
                    (cons (car L1) (append (cdr L1) L2)))))
 
   (setq reverse (let ((rev-helper nil))
-                  (progn
-                    (setq rev-helper (lambda (L R)
-                                       (if (null L)
-                                           R
-                                         (rev-helper (cdr L) (cons (car L) R)))))
-                    (lambda (L) (rev-helper L ())))))
+                  (setq rev-helper (lambda (L R)
+                                     (if (null L)
+                                         R
+                                       (rev-helper (cdr L) (cons (car L) R)))))
+                  (lambda (L) (rev-helper L ()))))
 
   (setq caar (lambda (L)
                (car (car L))))
@@ -905,52 +896,42 @@ repl <<_SHLISP_CORE_END_
   (setq ${SYMB_BACKQUOTE}
         (let ((bq-helper nil)
               (bq-list nil))
-          (progn
-            (setq bq-list (lambda (S tail depth)
-                            (if (null S)
-                                tail
-                              (if (and (consp (car S)) (eq (caar S) '${SYMB_COMMA_AT}))
-                                  (let ((splicee (if (= depth 1)
-                                                    (cadar S)
-                                                  (list '${SYMB_COMMA_AT} (bq-helper (cadar S) (- depth 1))))))
-                                    (bq-list (cdr S) (if (null tail) splicee (list 'append splicee tail)) depth))
-                                (bq-list (cdr S) (list 'cons (bq-helper (car S) depth) tail) depth)))))
-            (setq bq-helper (lambda (S depth)
-                              (if (atom S)
-                                  (if (symbolp S)
-                                      (list 'quote S)
-                                    S)
-                                (if (eq (car S) '${SYMB_COMMA})
-                                    (if (= depth 1)
-                                        (cadr S)
-                                      (list '${SYMB_COMMA} (bq-helper (cadr S) (- depth 1))))
-                                  (if (eq (car S) '${SYMB_BACKQUOTE})
-                                      (list '${SYMB_BACKQUOTE} (bq-helper (cadr S) (+ depth 1)))
-                                    (bq-list (reverse S) () depth))))))
-            (macro (S) (bq-helper S 1)))))
+          (setq bq-list (lambda (S tail depth)
+                          (if (null S)
+                              tail
+                            (if (and (consp (car S)) (eq (caar S) '${SYMB_COMMA_AT}))
+                                (let ((splicee (if (= depth 1)
+                                                  (cadar S)
+                                                (list '${SYMB_COMMA_AT} (bq-helper (cadar S) (- depth 1))))))
+                                  (bq-list (cdr S) (if (null tail) splicee (list 'append splicee tail)) depth))
+                              (bq-list (cdr S) (list 'cons (bq-helper (car S) depth) tail) depth)))))
+          (setq bq-helper (lambda (S depth)
+                            (if (atom S)
+                                (if (symbolp S)
+                                    (list 'quote S)
+                                  S)
+                              (if (eq (car S) '${SYMB_COMMA})
+                                  (if (= depth 1)
+                                      (cadr S)
+                                    (list '${SYMB_COMMA} (bq-helper (cadr S) (- depth 1))))
+                                (if (eq (car S) '${SYMB_BACKQUOTE})
+                                    (list '${SYMB_BACKQUOTE} (bq-helper (cadr S) (+ depth 1)))
+                                  (bq-list (reverse S) () depth))))))
+          (macro (S) (bq-helper S 1))))
 
-  (setq defun (macro (fn args . body)
-                     \`(setq ,fn (lambda ,args
-                                  ,@(if (= 1 (length body))
-                                        body
-                                      (cons (cons 'progn body) ()))))))
+  (setq defun (macro (fn args . body) \`(setq ,fn (lambda ,args ,@body))))
 
-  (setq defmacro (macro (fn args . body)
-                        \`(setq ,fn (macro ,args
-                                     ,@(if (= 1 (length body))
-                                           body
-                                         (cons (cons 'progn body) ()))))))
+  (setq defmacro (macro (fn args . body) \`(setq ,fn (macro ,args ,@body))))
 
   (let ((helper nil))
-    (progn
-      (setq helper (lambda (pairs)
-                     (if (eq (caar pairs) T)
-                         (cadar pairs)
-                       (list 'if (caar pairs) (cadar pairs)
-                             (if (null (cdr pairs))
-                                 nil
-                               (helper (cdr pairs)))))))
-      (defmacro cond pairs (helper pairs))))
+    (setq helper (lambda (pairs)
+                   (if (eq (caar pairs) T)
+                       (cadar pairs)
+                     (list 'if (caar pairs) (cadar pairs)
+                           (if (null (cdr pairs))
+                               nil
+                             (helper (cdr pairs)))))))
+    (defmacro cond pairs (helper pairs)))
 
   "This is shlisp!")
 _SHLISP_CORE_END_

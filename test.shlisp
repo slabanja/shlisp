@@ -42,7 +42,7 @@ x
 (setq f (lambda args (length args)))
 (f)
 (f 1 2 3)
-(setq g (lambda (x . rest) (+ x (length rest))))
+(defun g (x . rest) (+ x (length rest)))
 (g 0)
 (g 0 1)
 (g 0 1 2)
