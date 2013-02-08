@@ -1,54 +1,71 @@
-(null ())
-T
-nil
-(cons 1 '(2 3))
-(if T 1 2)
-(if nil 1 2)
-(setq a '(1 2 3))
-'a
-(lambda () "hello world")
-((lambda () "hello world"))
-(setq f (lambda () "hello world"))
-(f)
-(progn
-  (setq x 'decafbad)
-  (setq g (lambda (x)
-            (if (consp x)
-                (car x)
-              (progn
-                (setq x 14)
-                x))))
+
+; T and nil, numbers and strings evaluates to itself
+(list T nil () 0 -1 2 "one" "two")
+
+; the length builtin can be used on lists and strings
+(mapcar length '(() "" (1 2 3) "some string"))
+
+; reverse only works with lists
+(reverse '(first second third fourth fifth))
+
+; Dotted end in defun/defmacro argument list gets bound to "rest"
+(defun f (head . rest) (cons head (cons (length rest) rest)))
+(f 'first 'second 'third)
+(f 'single-argument)
+
+; A single symbol gets bound to all
+(defun g all (length all))
+(g 1 2 3)
+(g)
+
+; quote and backquote
+'(quote will stop evaluation)
+`(with backquote ,(+ 1 2 3 4) things ,@(list 1 2 3) can be spliced)
+`(1 2 ,@3)
+
+; setq will bind existing symbols, or create new ones in global scope
+(setq x 10)
+(let ((x 14))
+  (setq y x)
+  (setq x 78)
   x)
-(g x)
 x
-(setq obj (let ((x 1337))
-            (let ((get-x (lambda () x))
-                  (inc-x (lambda (a) (setq x (+ x (if (> a 0) a 1)))))
-                  (reset-x (lambda () (setq x 1337))))
-            (lambda (b) (if (eq b 'get-x)
-                            get-x
-                          (if (eq b 'inc-x)
-                              inc-x
-                            (if (eq b 'reset-x)
-                                reset-x
-                                nil)))))))
-((obj 'get-x))
-((obj 'inc-x) 4)
-((obj 'get-x))
-((obj 'reset-x))
-((obj 'get-x))
-`(1 ,@(list 2 3) ,@(list 4 5))
-`(1 ,(+ 2 3) ,(+ 4 5))
-(setq f (lambda args (length args)))
-(f)
-(f 1 2 3)
-(defun g (x . rest) (+ x (length rest)))
-(g 0)
-(g 0 1)
-(g 0 1 2)
-(g 0 1 2 3)
-(length ())
-(length "")
-(length '(1 2 3))
-(cond (nil 1) (T 2))
-(cond ((+ 1 2) (+ 4 5)))
+y
+
+; simple macros can be created
+(defmacro double (arg)
+  (let ((g (gensym)))
+    `(let ((,g ,arg))
+       (list ,g ,g))))
+
+; let and lambda creates lexical environments that can contain state
+(defun counter-class (val step-size)
+  (let ((direction 'up)
+        (step-size (if (> step-size 0) step-size 1)))
+    (let ((set-step (lambda (x)
+                      (setq step-size (if (> x 0) x 1))))
+          (get-step (lambda ()
+                      step-size))
+          (flip (lambda ()
+                  (setq direction (if (eq direction 'up) 'down 'up))))
+          (step (lambda ()
+                  (setq val (if (eq direction 'up) (+ val step-size) (- val step-size))))))
+      (lambda (method . args)
+        (cond ((eq method 'step) (step))
+              ((eq method 'flip) (flip))
+              ((eq method 'set-step) (set-step (car args)))
+              ((eq method 'get-step) (get-step))
+              (T "No such method"))))))
+
+(setq c1 (counter-class 0 1))
+(setq c2 (counter-class 0 7))
+(c1 'step)
+(c1 'step)
+(double (c2 'step))
+(double (c2 'step))
+
+(c1 'set-step (* 3 (c1 'get-step)))
+(c1 'step)
+(c1 'flip)
+(c1 'step)
+(c1 'step)

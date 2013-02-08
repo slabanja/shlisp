@@ -258,6 +258,8 @@ collect_environment () {
     for o in ${!x}; do
         ((reference_counter[$o] -= 1))
     done
+    o=outer_environment[$env]
+    ((reference_counter[$o] -= 1))
     unset outer_environment[$env]
     unset $env
 }
@@ -268,6 +270,7 @@ create_environment () {
     unset $e
     declare -g -A $e
     if [[ -n $outer_env ]]; then
+	((reference_counter[$outer_env] += 1))
         eval outer_environment[$e]=$outer_env
     fi
     eval $retvar=$e
